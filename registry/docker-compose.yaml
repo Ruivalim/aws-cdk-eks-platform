@@ -27,7 +27,7 @@ services:
       - "traefik.http.routers.registry.tls.certresolver=letsencrypt"
       - "traefik.http.services.registry.loadbalancer.server.port=5000"
       - "traefik.http.routers.registry.middlewares=registry-auth"
-      - "traefik.http.middlewares.registry-auth.basicauth.users=admin:$$apr1$$tVhAM8M8$$T5J0bIM9Z0Mvi8mCBnm9l0"
+      - "traefik.http.middlewares.registry-auth.basicauth.users=admin:$$apr1$$M50pvMod$$vAFWo7FBVyXWh8c2WrPLq0"
 
 volumes:
   registry-data:
