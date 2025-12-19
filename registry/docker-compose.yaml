@@ -1,9 +1,8 @@
 # Docker Registry - Private image registry
 # Docs: https://docs.docker.com/registry/
 #
-# Para gerar o hash da senha:
-#   htpasswd -nb admin suasenha | sed 's/\$/\$\$/g'
-# Copie o resultado e cole no REGISTRY_AUTH_USERS abaixo
+# Auth: Configurar via interface do Coolify (Basic Auth) ou usar htpasswd interno
+# Para htpasswd interno, descomentar as linhas de REGISTRY_AUTH abaixo
 
 services:
   registry:
@@ -12,22 +11,19 @@ services:
     restart: unless-stopped
     environment:
       - REGISTRY_STORAGE_DELETE_ENABLED=true
+      # Auth via htpasswd (descomentar para ativar)
+      # - REGISTRY_AUTH=htpasswd
+      # - REGISTRY_AUTH_HTPASSWD_REALM=Docker Registry
+      # - REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd
     volumes:
       - registry-data:/var/lib/registry
+      # - registry-auth:/auth  # Descomentar se usar htpasswd
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5000/v2/"]
       interval: 30s
       timeout: 10s
       retries: 3
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.registry.rule=Host(`registry.ruivalim.com.br`)"
-      - "traefik.http.routers.registry.entrypoints=https"
-      - "traefik.http.routers.registry.tls=true"
-      - "traefik.http.routers.registry.tls.certresolver=letsencrypt"
-      - "traefik.http.services.registry.loadbalancer.server.port=5000"
-      - "traefik.http.routers.registry.middlewares=registry-auth"
-      - "traefik.http.middlewares.registry-auth.basicauth.users=admin:$$apr1$$M50pvMod$$vAFWo7FBVyXWh8c2WrPLq0"
 
 volumes:
   registry-data:
+  # registry-auth:  # Descomentar se usar htpasswd
