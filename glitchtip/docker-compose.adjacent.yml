@@ -1,0 +1,73 @@
+# Glitchtip - Error Tracking (usando Redis/Postgres centrais)
+# Access: Private (Tailscale) or Public
+# Docs: https://glitchtip.com/documentation
+#
+# REQUER: Rodar `bun setup-databases.ts` para criar database e user
+# Ou manualmente:
+#   docker exec hwcwo0ckc08k00g40socsc48 psql -U postgres -c "CREATE USER glitchtip WITH ENCRYPTED PASSWORD 'xxx';"
+#   docker exec hwcwo0ckc08k00g40socsc48 psql -U postgres -c "CREATE DATABASE glitchtip OWNER glitchtip;"
+
+services:
+  glitchtip:
+    image: glitchtip/glitchtip:latest
+    container_name: glitchtip
+    restart: unless-stopped
+    environment:
+      # Database (Postgres central - hwcwo0ckc08k00g40socsc48)
+      - DATABASE_URL=postgres://${POSTGRES_USER:-glitchtip}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-hwcwo0ckc08k00g40socsc48}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-glitchtip}
+      # Redis (central - sg8oc044koow0ckwkggwc844)
+      - REDIS_URL=redis://${REDIS_HOST:-sg8oc044koow0ckwkggwc844}:${REDIS_PORT:-6379}/${REDIS_DB:-1}
+      - SECRET_KEY=${SECRET_KEY}
+      - PORT=8000
+      - EMAIL_URL=${EMAIL_URL:-consolemail://}
+      - GLITCHTIP_DOMAIN=${GLITCHTIP_DOMAIN}
+      - DEFAULT_FROM_EMAIL=${DEFAULT_FROM_EMAIL:-noreply@example.com}
+      - CELERY_WORKER_AUTOSCALE=1,3
+      - CELERY_WORKER_MAX_TASKS_PER_CHILD=10000
+
+      # Opcional: habilitar registro aberto
+      - ENABLE_OPEN_USER_REGISTRATION=${ENABLE_REGISTRATION:-false}
+
+      # Opcional: Social auth
+      # - SOCIALACCOUNT_PROVIDERS={}
+    volumes:
+      - glitchtip-uploads:/code/uploads
+    ports:
+      - "8000:8000"
+    networks:
+      - coolify
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/_health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  glitchtip-worker:
+    image: glitchtip/glitchtip:latest
+    container_name: glitchtip-worker
+    restart: unless-stopped
+    depends_on:
+      - glitchtip
+    command: ./bin/run-celery-with-beat.sh
+    environment:
+      # Database (Postgres central - hwcwo0ckc08k00g40socsc48)
+      - DATABASE_URL=postgres://${POSTGRES_USER:-glitchtip}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-hwcwo0ckc08k00g40socsc48}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-glitchtip}
+      # Redis (central - sg8oc044koow0ckwkggwc844)
+      - REDIS_URL=redis://${REDIS_HOST:-sg8oc044koow0ckwkggwc844}:${REDIS_PORT:-6379}/${REDIS_DB:-1}
+      - SECRET_KEY=${SECRET_KEY}
+      - EMAIL_URL=${EMAIL_URL:-consolemail://}
+      - GLITCHTIP_DOMAIN=${GLITCHTIP_DOMAIN}
+      - DEFAULT_FROM_EMAIL=${DEFAULT_FROM_EMAIL:-noreply@example.com}
+      - CELERY_WORKER_AUTOSCALE=1,3
+      - CELERY_WORKER_MAX_TASKS_PER_CHILD=10000
+    volumes:
+      - glitchtip-uploads:/code/uploads
+    networks:
+      - coolify
+
+volumes:
+  glitchtip-uploads:
+
+networks:
+  coolify:
+    external: true

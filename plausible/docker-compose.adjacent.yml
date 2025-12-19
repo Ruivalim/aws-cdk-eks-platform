@@ -1,0 +1,62 @@
+# Plausible - Privacy-Friendly Analytics (usando Postgres central)
+# Access: Public (with domain)
+# Docs: https://plausible.io/docs/self-hosting
+#
+# NOTA: Plausible ainda precisa do ClickHouse (não suporta Postgres para eventos)
+# REQUER: Rodar `bun setup-databases.ts` para criar database e user
+
+services:
+  plausible:
+    image: ghcr.io/plausible/community-edition:latest
+    container_name: plausible
+    restart: unless-stopped
+    depends_on:
+      plausible-clickhouse:
+        condition: service_healthy
+    command: sh -c "sleep 10 && /entrypoint.sh db createdb && /entrypoint.sh db migrate && /entrypoint.sh run"
+    environment:
+      # Postgres central
+      - DATABASE_URL=postgres://${POSTGRES_USER:-plausible}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-hwcwo0ckc08k00g40socsc48}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-plausible}
+      # ClickHouse local (necessário para eventos)
+      - CLICKHOUSE_DATABASE_URL=http://plausible-clickhouse:8123/plausible_events_db
+      - SECRET_KEY_BASE=${SECRET_KEY_BASE}
+      - BASE_URL=${BASE_URL}
+      - TOTP_VAULT_KEY=${TOTP_VAULT_KEY}
+      - DISABLE_REGISTRATION=invite_only
+    ports:
+      - "8000:8000"
+    networks:
+      - coolify
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ClickHouse ainda é necessário (não pode ser centralizado facilmente)
+  plausible-clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    container_name: plausible-clickhouse
+    restart: unless-stopped
+    volumes:
+      - plausible-clickhouse-data:/var/lib/clickhouse
+      - plausible-clickhouse-logs:/var/log/clickhouse-server
+    networks:
+      - coolify
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  plausible-clickhouse-data:
+  plausible-clickhouse-logs:
+
+networks:
+  coolify:
+    external: true

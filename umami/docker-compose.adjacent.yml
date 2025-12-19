@@ -1,0 +1,29 @@
+# Umami - Simple Analytics (usando Postgres central)
+# Access: Public (with domain)
+# Docs: https://umami.is/docs
+#
+# REQUER: Rodar `bun setup-databases.ts` para criar database e user
+
+services:
+  umami:
+    image: ghcr.io/umami-software/umami:postgresql-latest
+    container_name: umami
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-umami}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-hwcwo0ckc08k00g40socsc48}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-umami}
+      - DATABASE_TYPE=postgresql
+      - APP_SECRET=${APP_SECRET}
+      - TRACKER_SCRIPT_NAME=${TRACKER_SCRIPT_NAME:-script.js}
+    ports:
+      - "3000:3000"
+    networks:
+      - coolify
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  coolify:
+    external: true

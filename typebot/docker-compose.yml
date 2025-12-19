@@ -1,0 +1,83 @@
+# Typebot - Chatbot Builder
+# Access: Public (with domain)
+# Docs: https://docs.typebot.io/
+
+services:
+  typebot-builder:
+    image: baptistearno/typebot-builder:latest
+    container_name: typebot-builder
+    restart: unless-stopped
+    depends_on:
+      typebot-postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://typebot:${POSTGRES_PASSWORD}@typebot-postgres:5432/typebot
+      - ENCRYPTION_SECRET=${ENCRYPTION_SECRET}
+      - NEXTAUTH_URL=${NEXTAUTH_URL}
+      - NEXT_PUBLIC_VIEWER_URL=${NEXT_PUBLIC_VIEWER_URL}
+
+      # S3 Storage (optional - pode usar MinIO)
+      # - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+      # - S3_SECRET_KEY=${S3_SECRET_KEY}
+      # - S3_BUCKET=${S3_BUCKET}
+      # - S3_ENDPOINT=${S3_ENDPOINT}
+
+      # Email (optional)
+      # - SMTP_HOST=${SMTP_HOST}
+      # - SMTP_PORT=${SMTP_PORT}
+      # - SMTP_USERNAME=${SMTP_USERNAME}
+      # - SMTP_PASSWORD=${SMTP_PASSWORD}
+      # - NEXT_PUBLIC_SMTP_FROM=${SMTP_FROM}
+
+      # Auth providers (optional)
+      # - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
+      # - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
+      # - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      # - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+
+      - DISABLE_SIGNUP=false
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  typebot-viewer:
+    image: baptistearno/typebot-viewer:latest
+    container_name: typebot-viewer
+    restart: unless-stopped
+    depends_on:
+      - typebot-builder
+    environment:
+      - DATABASE_URL=postgresql://typebot:${POSTGRES_PASSWORD}@typebot-postgres:5432/typebot
+      - ENCRYPTION_SECRET=${ENCRYPTION_SECRET}
+      - NEXTAUTH_URL=${NEXTAUTH_URL}
+      - NEXT_PUBLIC_VIEWER_URL=${NEXT_PUBLIC_VIEWER_URL}
+    ports:
+      - "3001:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  typebot-postgres:
+    image: postgres:15-alpine
+    container_name: typebot-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=typebot
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=typebot
+    volumes:
+      - typebot-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-d", "typebot", "-U", "typebot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  typebot-postgres-data:

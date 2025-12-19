@@ -1,0 +1,43 @@
+# Umami - Simple Analytics
+# Access: Public (with domain)
+# Docs: https://umami.is/docs
+
+services:
+  umami:
+    image: ghcr.io/umami-software/umami:postgresql-latest
+    container_name: umami
+    restart: unless-stopped
+    depends_on:
+      umami-postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://umami:${POSTGRES_PASSWORD}@umami-postgres:5432/umami
+      - DATABASE_TYPE=postgresql
+      - APP_SECRET=${APP_SECRET}
+      - TRACKER_SCRIPT_NAME=${TRACKER_SCRIPT_NAME:-script.js}
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  umami-postgres:
+    image: postgres:15-alpine
+    container_name: umami-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=umami
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=umami
+    volumes:
+      - umami-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-d", "umami", "-U", "umami"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  umami-postgres-data:

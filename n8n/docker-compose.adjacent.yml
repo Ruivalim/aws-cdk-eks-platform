@@ -1,0 +1,73 @@
+# n8n - Workflow Automation (usando Redis/Postgres centrais)
+# Access: Private (Tailscale recommended)
+# Docs: https://docs.n8n.io/
+#
+# REQUER: Rodar `bun setup-databases.ts` para criar database e user
+
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=${POSTGRES_HOST:-hwcwo0ckc08k00g40socsc48}
+      - DB_POSTGRESDB_PORT=${POSTGRES_PORT:-5432}
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB:-n8n}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER:-n8n}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+
+      - QUEUE_BULL_REDIS_HOST=${REDIS_HOST:-sg8oc044koow0ckwkggwc844}
+      - QUEUE_BULL_REDIS_PORT=${REDIS_PORT:-6379}
+      - QUEUE_BULL_REDIS_DB=${REDIS_DB:-3}
+      - EXECUTIONS_MODE=queue
+
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - WEBHOOK_URL=${WEBHOOK_URL}
+
+      - GENERIC_TIMEZONE=${TZ:-America/Sao_Paulo}
+    volumes:
+      - n8n-data:/home/node/.n8n
+    ports:
+      - "5678:5678"
+    networks:
+      - coolify
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  n8n-worker:
+    image: n8nio/n8n:latest
+    container_name: n8n-worker
+    restart: unless-stopped
+    depends_on:
+      - n8n
+    command: worker
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=${POSTGRES_HOST:-hwcwo0ckc08k00g40socsc48}
+      - DB_POSTGRESDB_PORT=${POSTGRES_PORT:-5432}
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB:-n8n}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER:-n8n}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - QUEUE_BULL_REDIS_HOST=${REDIS_HOST:-sg8oc044koow0ckwkggwc844}
+      - QUEUE_BULL_REDIS_PORT=${REDIS_PORT:-6379}
+      - QUEUE_BULL_REDIS_DB=${REDIS_DB:-3}
+      - EXECUTIONS_MODE=queue
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+    volumes:
+      - n8n-data:/home/node/.n8n
+    networks:
+      - coolify
+
+volumes:
+  n8n-data:
+
+networks:
+  coolify:
+    external: true

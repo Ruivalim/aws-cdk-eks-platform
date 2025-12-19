@@ -1,0 +1,25 @@
+# Nitropage - Simple CMS / Landing Pages
+# Access: Public (with domain)
+# Docs: https://nitropage.com/docs
+
+services:
+  nitropage:
+    image: nitropage/nitropage:sqlite
+    container_name: nitropage
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=file:../.data/dev.db
+      - NP_AUTH_SALT=${NP_AUTH_SALT}
+      - NP_AUTH_PASSWORD=${NP_AUTH_PASSWORD}
+    volumes:
+      - nitropage-data:/app/.data
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3000/admin"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  nitropage-data:

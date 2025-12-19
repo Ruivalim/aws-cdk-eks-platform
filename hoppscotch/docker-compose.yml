@@ -1,0 +1,96 @@
+# Hoppscotch - API Testing (Postman alternative)
+# Access: Public (with domain)
+# Docs: https://docs.hoppscotch.io/
+
+services:
+  hoppscotch-backend:
+    image: hoppscotch/hoppscotch-backend:latest
+    container_name: hoppscotch-backend
+    restart: unless-stopped
+    depends_on:
+      hoppscotch-db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://hoppscotch:${POSTGRES_PASSWORD}@hoppscotch-db:5432/hoppscotch
+      - JWT_SECRET=${JWT_SECRET}
+      - SESSION_SECRET=${SESSION_SECRET}
+      - REFRESH_TOKEN_VALIDITY=604800000
+      - ACCESS_TOKEN_VALIDITY=86400000
+
+      # URLs
+      - REDIRECT_URL=${APP_URL}
+      - WHITELISTED_ORIGINS=${APP_URL},${ADMIN_URL}
+      - VITE_ALLOWED_AUTH_PROVIDERS=EMAIL
+
+      # Email (optional)
+      - MAILER_SMTP_ENABLE=${MAILER_SMTP_ENABLE:-false}
+      - MAILER_USE_CUSTOM_CONFIGS=${MAILER_USE_CUSTOM_CONFIGS:-false}
+      # - MAILER_SMTP_HOST=${MAILER_SMTP_HOST}
+      # - MAILER_SMTP_PORT=${MAILER_SMTP_PORT}
+      # - MAILER_SMTP_USER=${MAILER_SMTP_USER}
+      # - MAILER_SMTP_PASSWORD=${MAILER_SMTP_PASSWORD}
+      # - MAILER_ADDRESS_FROM=${MAILER_ADDRESS_FROM}
+
+      # Rate limiting
+      - RATE_LIMIT_TTL=60
+      - RATE_LIMIT_MAX=100
+    ports:
+      - "3170:3170"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3170/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  hoppscotch-app:
+    image: hoppscotch/hoppscotch-app:latest
+    container_name: hoppscotch-app
+    restart: unless-stopped
+    depends_on:
+      - hoppscotch-backend
+    environment:
+      - VITE_BASE_URL=${APP_URL}
+      - VITE_SHORTCODE_BASE_URL=${APP_URL}
+      - VITE_ADMIN_URL=${ADMIN_URL}
+      - VITE_BACKEND_GQL_URL=${BACKEND_URL}/graphql
+      - VITE_BACKEND_WS_URL=${BACKEND_WS_URL}/graphql
+      - VITE_BACKEND_API_URL=${BACKEND_URL}/v1
+      - VITE_APP_TOS_LINK=${APP_URL}/terms
+      - VITE_APP_PRIVACY_POLICY_LINK=${APP_URL}/privacy
+    ports:
+      - "3000:3000"
+
+  hoppscotch-admin:
+    image: hoppscotch/hoppscotch-sh-admin:latest
+    container_name: hoppscotch-admin
+    restart: unless-stopped
+    depends_on:
+      - hoppscotch-backend
+    environment:
+      - VITE_BASE_URL=${APP_URL}
+      - VITE_SHORTCODE_BASE_URL=${APP_URL}
+      - VITE_ADMIN_URL=${ADMIN_URL}
+      - VITE_BACKEND_GQL_URL=${BACKEND_URL}/graphql
+      - VITE_BACKEND_WS_URL=${BACKEND_WS_URL}/graphql
+      - VITE_BACKEND_API_URL=${BACKEND_URL}/v1
+    ports:
+      - "3100:3100"
+
+  hoppscotch-db:
+    image: postgres:15-alpine
+    container_name: hoppscotch-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=hoppscotch
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=hoppscotch
+    volumes:
+      - hoppscotch-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-d", "hoppscotch", "-U", "hoppscotch"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  hoppscotch-db-data:

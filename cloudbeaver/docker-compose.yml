@@ -1,0 +1,25 @@
+# CloudBeaver - Database Admin (better than pgAdmin)
+# Access: Private (Tailscale only)
+# Docs: https://github.com/dbeaver/cloudbeaver
+
+services:
+  cloudbeaver:
+    image: dbeaver/cloudbeaver:latest
+    container_name: cloudbeaver
+    restart: unless-stopped
+    volumes:
+      - cloudbeaver-data:/opt/cloudbeaver/workspace
+    environment:
+      - CB_SERVER_NAME=CloudBeaver
+      - CB_ADMIN_NAME=${CB_ADMIN_NAME:-admin}
+      - CB_ADMIN_PASSWORD=${CB_ADMIN_PASSWORD:-}
+    ports:
+      - "8978:8978"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8978/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  cloudbeaver-data:

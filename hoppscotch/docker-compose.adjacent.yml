@@ -1,0 +1,90 @@
+# Hoppscotch - API Testing (usando Postgres central)
+# Access: Public (with domain)
+# Docs: https://docs.hoppscotch.io/
+#
+# REQUER: Rodar `bun setup-databases.ts` para criar database e user
+# Ou manualmente:
+#   docker exec hwcwo0ckc08k00g40socsc48 psql -U postgres -c "CREATE USER hoppscotch WITH ENCRYPTED PASSWORD 'xxx';"
+#   docker exec hwcwo0ckc08k00g40socsc48 psql -U postgres -c "CREATE DATABASE hoppscotch OWNER hoppscotch;"
+
+services:
+  hoppscotch-backend:
+    image: hoppscotch/hoppscotch-backend:latest
+    container_name: hoppscotch-backend
+    restart: unless-stopped
+    environment:
+      # Database (Postgres central - hwcwo0ckc08k00g40socsc48)
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-hoppscotch}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-hwcwo0ckc08k00g40socsc48}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-hoppscotch}
+      - JWT_SECRET=${JWT_SECRET}
+      - SESSION_SECRET=${SESSION_SECRET}
+      - REFRESH_TOKEN_VALIDITY=604800000
+      - ACCESS_TOKEN_VALIDITY=86400000
+
+      # URLs
+      - REDIRECT_URL=${APP_URL}
+      - WHITELISTED_ORIGINS=${APP_URL},${ADMIN_URL}
+      - VITE_ALLOWED_AUTH_PROVIDERS=EMAIL
+
+      # Email (opcional)
+      - MAILER_SMTP_ENABLE=${MAILER_SMTP_ENABLE:-false}
+      - MAILER_USE_CUSTOM_CONFIGS=${MAILER_USE_CUSTOM_CONFIGS:-false}
+      # - MAILER_SMTP_HOST=${MAILER_SMTP_HOST}
+      # - MAILER_SMTP_PORT=${MAILER_SMTP_PORT}
+      # - MAILER_SMTP_USER=${MAILER_SMTP_USER}
+      # - MAILER_SMTP_PASSWORD=${MAILER_SMTP_PASSWORD}
+      # - MAILER_ADDRESS_FROM=${MAILER_ADDRESS_FROM}
+
+      # Rate limiting
+      - RATE_LIMIT_TTL=60
+      - RATE_LIMIT_MAX=100
+    ports:
+      - "3170:3170"
+    networks:
+      - coolify
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3170/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  hoppscotch-app:
+    image: hoppscotch/hoppscotch-app:latest
+    container_name: hoppscotch-app
+    restart: unless-stopped
+    depends_on:
+      - hoppscotch-backend
+    environment:
+      - VITE_BASE_URL=${APP_URL}
+      - VITE_SHORTCODE_BASE_URL=${APP_URL}
+      - VITE_ADMIN_URL=${ADMIN_URL}
+      - VITE_BACKEND_GQL_URL=${BACKEND_URL}/graphql
+      - VITE_BACKEND_WS_URL=${BACKEND_WS_URL}/graphql
+      - VITE_BACKEND_API_URL=${BACKEND_URL}/v1
+      - VITE_APP_TOS_LINK=${APP_URL}/terms
+      - VITE_APP_PRIVACY_POLICY_LINK=${APP_URL}/privacy
+    ports:
+      - "3000:3000"
+    networks:
+      - coolify
+
+  hoppscotch-admin:
+    image: hoppscotch/hoppscotch-sh-admin:latest
+    container_name: hoppscotch-admin
+    restart: unless-stopped
+    depends_on:
+      - hoppscotch-backend
+    environment:
+      - VITE_BASE_URL=${APP_URL}
+      - VITE_SHORTCODE_BASE_URL=${APP_URL}
+      - VITE_ADMIN_URL=${ADMIN_URL}
+      - VITE_BACKEND_GQL_URL=${BACKEND_URL}/graphql
+      - VITE_BACKEND_WS_URL=${BACKEND_WS_URL}/graphql
+      - VITE_BACKEND_API_URL=${BACKEND_URL}/v1
+    ports:
+      - "3100:3100"
+    networks:
+      - coolify
+
+networks:
+  coolify:
+    external: true

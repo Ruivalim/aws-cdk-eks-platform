@@ -1,0 +1,63 @@
+# Cal.com - Scheduling Platform
+# Access: Public (with domain)
+# Docs: https://cal.com/docs
+
+services:
+  calcom:
+    image: calcom/cal.com:latest
+    container_name: calcom
+    restart: unless-stopped
+    depends_on:
+      calcom-postgres:
+        condition: service_healthy
+    environment:
+      # Database
+      - DATABASE_URL=postgresql://calcom:${POSTGRES_PASSWORD}@calcom-postgres:5432/calcom
+      - DATABASE_DIRECT_URL=postgresql://calcom:${POSTGRES_PASSWORD}@calcom-postgres:5432/calcom
+
+      # Auth
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - CALENDSO_ENCRYPTION_KEY=${CALENDSO_ENCRYPTION_KEY}
+
+      # URLs
+      - NEXT_PUBLIC_WEBAPP_URL=${NEXT_PUBLIC_WEBAPP_URL}
+      - NEXTAUTH_URL=${NEXT_PUBLIC_WEBAPP_URL}
+
+      # Email (optional)
+      # - EMAIL_FROM=${EMAIL_FROM}
+      # - EMAIL_SERVER_HOST=${EMAIL_SERVER_HOST}
+      # - EMAIL_SERVER_PORT=${EMAIL_SERVER_PORT}
+      # - EMAIL_SERVER_USER=${EMAIL_SERVER_USER}
+      # - EMAIL_SERVER_PASSWORD=${EMAIL_SERVER_PASSWORD}
+
+      # Google Calendar (optional)
+      # - GOOGLE_API_CREDENTIALS=${GOOGLE_API_CREDENTIALS}
+
+      # Misc
+      - CALCOM_TELEMETRY_DISABLED=1
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  calcom-postgres:
+    image: postgres:15-alpine
+    container_name: calcom-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=calcom
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=calcom
+    volumes:
+      - calcom-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-d", "calcom", "-U", "calcom"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  calcom-postgres-data:

@@ -1,0 +1,68 @@
+# Soketi - WebSocket Server (usando Redis central para scaling)
+# Access: Public (WebSocket connections need public access)
+# Docs: https://docs.soketi.app/
+#
+# O Redis permite horizontal scaling e presence channels
+
+services:
+  soketi:
+    image: quay.io/soketi/soketi:latest
+    container_name: soketi
+    restart: unless-stopped
+    environment:
+      # Debug
+      - SOKETI_DEBUG=${SOKETI_DEBUG:-0}
+
+      # Default app credentials
+      - SOKETI_DEFAULT_APP_ID=${SOKETI_APP_ID:-app-id}
+      - SOKETI_DEFAULT_APP_KEY=${SOKETI_APP_KEY:-app-key}
+      - SOKETI_DEFAULT_APP_SECRET=${SOKETI_APP_SECRET:-app-secret}
+      - SOKETI_DEFAULT_APP_ENABLE_CLIENT_MESSAGES=true
+      - SOKETI_DEFAULT_APP_ENABLED=true
+
+      # Limites
+      - SOKETI_DEFAULT_APP_MAX_CONNS=${SOKETI_MAX_CONNS:-1000}
+      - SOKETI_DEFAULT_APP_MAX_BACKEND_EVENTS_PER_SEC=${SOKETI_MAX_EVENTS:-1000}
+      - SOKETI_DEFAULT_APP_MAX_CLIENT_EVENTS_PER_SEC=100
+      - SOKETI_DEFAULT_APP_MAX_READ_REQ_PER_SEC=100
+
+      # Redis adapter (central - sg8oc044koow0ckwkggwc844) para horizontal scaling
+      - SOKETI_ADAPTER_DRIVER=redis
+      - SOKETI_ADAPTER_REDIS_PREFIX=soketi
+      - SOKETI_ADAPTER_REDIS_HOST=${REDIS_HOST:-sg8oc044koow0ckwkggwc844}
+      - SOKETI_ADAPTER_REDIS_PORT=${REDIS_PORT:-6379}
+      - SOKETI_ADAPTER_REDIS_DB=${REDIS_DB:-2}
+
+      # Queue driver (Redis central)
+      - SOKETI_QUEUE_DRIVER=redis
+      - SOKETI_QUEUE_REDIS_HOST=${REDIS_HOST:-sg8oc044koow0ckwkggwc844}
+      - SOKETI_QUEUE_REDIS_PORT=${REDIS_PORT:-6379}
+      - SOKETI_QUEUE_REDIS_DB=${REDIS_DB:-2}
+
+      # Rate limiter (Redis central)
+      - SOKETI_RATE_LIMITER_DRIVER=redis
+      - SOKETI_RATE_LIMITER_REDIS_HOST=${REDIS_HOST:-sg8oc044koow0ckwkggwc844}
+      - SOKETI_RATE_LIMITER_REDIS_PORT=${REDIS_PORT:-6379}
+      - SOKETI_RATE_LIMITER_REDIS_DB=${REDIS_DB:-2}
+
+      # SSL (handled by Coolify/Traefik)
+      - SOKETI_SSL_CERT=
+      - SOKETI_SSL_KEY=
+
+      # Metrics (opcional)
+      - SOKETI_METRICS_ENABLED=${SOKETI_METRICS_ENABLED:-false}
+      - SOKETI_METRICS_SERVER_PORT=9601
+    ports:
+      - "6001:6001"   # WebSocket
+      - "9601:9601"   # Metrics (opcional)
+    networks:
+      - coolify
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:6001"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  coolify:
+    external: true

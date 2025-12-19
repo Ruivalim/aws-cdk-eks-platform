@@ -1,0 +1,82 @@
+# Outline - Team Wiki (usando Redis/Postgres centrais)
+# Access: Public (with domain)
+# Docs: https://docs.getoutline.com/s/hosting/
+#
+# REQUER: Rodar `bun setup-databases.ts` para criar database e user
+# Ou manualmente:
+#   docker exec hwcwo0ckc08k00g40socsc48 psql -U postgres -c "CREATE USER outline WITH ENCRYPTED PASSWORD 'xxx';"
+#   docker exec hwcwo0ckc08k00g40socsc48 psql -U postgres -c "CREATE DATABASE outline OWNER outline;"
+
+services:
+  outline:
+    image: docker.getoutline.com/outlinewiki/outline:latest
+    container_name: outline
+    restart: unless-stopped
+    environment:
+      # Generated secrets (use: openssl rand -hex 32)
+      - SECRET_KEY=${SECRET_KEY}
+      - UTILS_SECRET=${UTILS_SECRET}
+
+      # Database (Postgres central - hwcwo0ckc08k00g40socsc48)
+      - DATABASE_URL=postgres://${POSTGRES_USER:-outline}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-hwcwo0ckc08k00g40socsc48}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-outline}
+      - DATABASE_CONNECTION_POOL_MIN=1
+      - DATABASE_CONNECTION_POOL_MAX=10
+      - PGSSLMODE=disable
+
+      # Redis (central - sg8oc044koow0ckwkggwc844)
+      - REDIS_URL=redis://${REDIS_HOST:-sg8oc044koow0ckwkggwc844}:${REDIS_PORT:-6379}/${REDIS_DB:-0}
+
+      # App
+      - URL=${OUTLINE_URL}
+      - PORT=3000
+      - FORCE_HTTPS=true
+
+      # File storage (local or S3)
+      - FILE_STORAGE=local
+      - FILE_STORAGE_LOCAL_ROOT_DIR=/var/lib/outline/data
+      # Para S3:
+      # - FILE_STORAGE=s3
+      # - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      # - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      # - AWS_REGION=${AWS_REGION:-us-east-1}
+      # - AWS_S3_UPLOAD_BUCKET_NAME=${AWS_S3_BUCKET}
+      # - AWS_S3_UPLOAD_BUCKET_URL=${AWS_S3_BUCKET_URL}
+
+      # Auth (escolha um)
+      # Slack:
+      # - SLACK_CLIENT_ID=${SLACK_CLIENT_ID}
+      # - SLACK_CLIENT_SECRET=${SLACK_CLIENT_SECRET}
+
+      # Google:
+      # - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      # - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+
+      # OIDC (generico):
+      # - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
+      # - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
+      # - OIDC_AUTH_URI=${OIDC_AUTH_URI}
+      # - OIDC_TOKEN_URI=${OIDC_TOKEN_URI}
+      # - OIDC_USERINFO_URI=${OIDC_USERINFO_URI}
+      # - OIDC_DISPLAY_NAME=${OIDC_DISPLAY_NAME:-SSO}
+
+      # Opcional
+      - DEFAULT_LANGUAGE=pt_BR
+      - ENABLE_UPDATES=true
+    volumes:
+      - outline-data:/var/lib/outline/data
+    ports:
+      - "3000:3000"
+    networks:
+      - coolify
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/_health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  outline-data:
+
+networks:
+  coolify:
+    external: true

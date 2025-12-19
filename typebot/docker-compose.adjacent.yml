@@ -1,0 +1,59 @@
+# Typebot - Chatbot Builder (usando Postgres central)
+# Access: Public (with domain)
+# Docs: https://docs.typebot.io/
+#
+# REQUER: Rodar `bun setup-databases.ts` para criar database e user
+
+services:
+  typebot-builder:
+    image: baptistearno/typebot-builder:latest
+    container_name: typebot-builder
+    restart: unless-stopped
+    environment:
+      # Database (Postgres central)
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-typebot}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-hwcwo0ckc08k00g40socsc48}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-typebot}
+      - ENCRYPTION_SECRET=${ENCRYPTION_SECRET}
+      - NEXTAUTH_URL=${NEXTAUTH_URL}
+      - NEXT_PUBLIC_VIEWER_URL=${NEXT_PUBLIC_VIEWER_URL}
+
+      # S3 Storage (pode usar MinIO central)
+      # - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+      # - S3_SECRET_KEY=${S3_SECRET_KEY}
+      # - S3_BUCKET=${S3_BUCKET}
+      # - S3_ENDPOINT=${S3_ENDPOINT}
+
+      - DISABLE_SIGNUP=false
+    ports:
+      - "3000:3000"
+    networks:
+      - coolify
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  typebot-viewer:
+    image: baptistearno/typebot-viewer:latest
+    container_name: typebot-viewer
+    restart: unless-stopped
+    depends_on:
+      - typebot-builder
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-typebot}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-hwcwo0ckc08k00g40socsc48}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-typebot}
+      - ENCRYPTION_SECRET=${ENCRYPTION_SECRET}
+      - NEXTAUTH_URL=${NEXTAUTH_URL}
+      - NEXT_PUBLIC_VIEWER_URL=${NEXT_PUBLIC_VIEWER_URL}
+    ports:
+      - "3001:3000"
+    networks:
+      - coolify
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  coolify:
+    external: true
