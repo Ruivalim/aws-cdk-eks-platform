@@ -26,7 +26,6 @@ services:
       - "traefik.http.routers.registry.tls=true"
       - "traefik.http.routers.registry.tls.certresolver=letsencrypt"
       - "traefik.http.services.registry.loadbalancer.server.port=5000"
-      # Basic Auth - gere com: htpasswd -nb user senha | sed 's/\$/\$\$/g'
       - "traefik.http.routers.registry.middlewares=registry-auth"
       - "traefik.http.middlewares.registry-auth.basicauth.users=admin:$$apr1$$mh4wHiqz$$AFRrksmTQC/8FSTieAp9M."
 
