@@ -283,3 +283,133 @@ export const RECOMMENDED_IMAGES = [
 	{ slug: 'ubuntu-22-04-x64', name: 'Ubuntu 22.04 LTS' },
 	{ slug: 'debian-12-x64', name: 'Debian 12' },
 ];
+
+// ============ DNS Domains ============
+
+export interface Domain {
+	name: string;
+	ttl: number;
+	zone_file: string;
+}
+
+export async function listDomains(): Promise<Domain[]> {
+	const { domains } = await doFetch<{ domains: Domain[] }>('/domains?per_page=100');
+	return domains;
+}
+
+export async function getDomain(name: string): Promise<Domain> {
+	const { domain } = await doFetch<{ domain: Domain }>(`/domains/${name}`);
+	return domain;
+}
+
+export async function createDomain(name: string, ipAddress?: string): Promise<Domain> {
+	const { domain } = await doFetch<{ domain: Domain }>('/domains', {
+		method: 'POST',
+		body: JSON.stringify({ name, ip_address: ipAddress }),
+	});
+	return domain;
+}
+
+export async function deleteDomain(name: string): Promise<void> {
+	await doFetch(`/domains/${name}`, { method: 'DELETE' });
+}
+
+// ============ DNS Records ============
+
+export type DnsRecordType = 'A' | 'AAAA' | 'CAA' | 'CNAME' | 'MX' | 'NS' | 'SOA' | 'SRV' | 'TXT';
+
+export interface DnsRecord {
+	id: number;
+	type: DnsRecordType;
+	name: string;
+	data: string;
+	priority: number | null;
+	port: number | null;
+	ttl: number;
+	weight: number | null;
+	flags: number | null;
+	tag: string | null;
+}
+
+export interface CreateDnsRecordOptions {
+	type: DnsRecordType;
+	name: string;
+	data: string;
+	priority?: number;
+	port?: number;
+	ttl?: number;
+	weight?: number;
+	flags?: number;
+	tag?: string;
+}
+
+export interface UpdateDnsRecordOptions {
+	type?: DnsRecordType;
+	name?: string;
+	data?: string;
+	priority?: number;
+	port?: number;
+	ttl?: number;
+	weight?: number;
+	flags?: number;
+	tag?: string;
+}
+
+export async function listDnsRecords(domain: string): Promise<DnsRecord[]> {
+	const { domain_records } = await doFetch<{ domain_records: DnsRecord[] }>(
+		`/domains/${domain}/records?per_page=200`
+	);
+	return domain_records;
+}
+
+export async function getDnsRecord(domain: string, recordId: number): Promise<DnsRecord> {
+	const { domain_record } = await doFetch<{ domain_record: DnsRecord }>(
+		`/domains/${domain}/records/${recordId}`
+	);
+	return domain_record;
+}
+
+export async function createDnsRecord(domain: string, options: CreateDnsRecordOptions): Promise<DnsRecord> {
+	const { domain_record } = await doFetch<{ domain_record: DnsRecord }>(`/domains/${domain}/records`, {
+		method: 'POST',
+		body: JSON.stringify(options),
+	});
+	return domain_record;
+}
+
+export async function updateDnsRecord(
+	domain: string,
+	recordId: number,
+	options: UpdateDnsRecordOptions
+): Promise<DnsRecord> {
+	const { domain_record } = await doFetch<{ domain_record: DnsRecord }>(
+		`/domains/${domain}/records/${recordId}`,
+		{
+			method: 'PATCH',
+			body: JSON.stringify(options),
+		}
+	);
+	return domain_record;
+}
+
+export async function deleteDnsRecord(domain: string, recordId: number): Promise<void> {
+	await doFetch(`/domains/${domain}/records/${recordId}`, { method: 'DELETE' });
+}
+
+// ============ DNS Helpers ============
+
+export const DNS_RECORD_TYPES: DnsRecordType[] = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SRV', 'CAA'];
+
+export const DNS_RECORD_DESCRIPTIONS: Record<DnsRecordType, string> = {
+	A: 'Maps domain to IPv4 address',
+	AAAA: 'Maps domain to IPv6 address',
+	CNAME: 'Alias to another domain',
+	MX: 'Mail server for the domain',
+	TXT: 'Text record (SPF, DKIM, verification)',
+	NS: 'Nameserver for the domain',
+	SRV: 'Service location record',
+	CAA: 'Certificate Authority Authorization',
+	SOA: 'Start of Authority (auto-managed)',
+};
+
+export const DEFAULT_TTL = 1800; // 30 minutes

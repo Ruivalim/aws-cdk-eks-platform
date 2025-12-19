@@ -158,6 +158,112 @@ Bun.serve({
 			},
 		},
 
+		// ============ DNS Domains ============
+
+		'/api/do/domains': {
+			GET: async () => {
+				try {
+					const domains = await DO.listDomains();
+					return Response.json(domains);
+				} catch (error) {
+					return Response.json({ error: String(error) }, { status: 500 });
+				}
+			},
+			POST: async (req) => {
+				try {
+					const { name, ip_address } = await req.json();
+					if (!name) {
+						return Response.json({ error: 'name is required' }, { status: 400 });
+					}
+					const domain = await DO.createDomain(name, ip_address);
+					return Response.json(domain, { status: 201 });
+				} catch (error) {
+					return Response.json({ error: String(error) }, { status: 500 });
+				}
+			},
+		},
+
+		'/api/do/domains/:domain': {
+			GET: async (req) => {
+				try {
+					const domain = await DO.getDomain(req.params.domain);
+					return Response.json(domain);
+				} catch (error) {
+					return Response.json({ error: String(error) }, { status: 500 });
+				}
+			},
+			DELETE: async (req) => {
+				try {
+					await DO.deleteDomain(req.params.domain);
+					return Response.json({ success: true });
+				} catch (error) {
+					return Response.json({ error: String(error) }, { status: 500 });
+				}
+			},
+		},
+
+		// ============ DNS Records ============
+
+		'/api/do/domains/:domain/records': {
+			GET: async (req) => {
+				try {
+					const records = await DO.listDnsRecords(req.params.domain);
+					return Response.json(records);
+				} catch (error) {
+					return Response.json({ error: String(error) }, { status: 500 });
+				}
+			},
+			POST: async (req) => {
+				try {
+					const body = await req.json();
+					if (!body.type || !body.name || !body.data) {
+						return Response.json({ error: 'type, name, and data are required' }, { status: 400 });
+					}
+					const record = await DO.createDnsRecord(req.params.domain, body);
+					return Response.json(record, { status: 201 });
+				} catch (error) {
+					return Response.json({ error: String(error) }, { status: 500 });
+				}
+			},
+		},
+
+		'/api/do/domains/:domain/records/:id': {
+			GET: async (req) => {
+				try {
+					const record = await DO.getDnsRecord(req.params.domain, Number(req.params.id));
+					return Response.json(record);
+				} catch (error) {
+					return Response.json({ error: String(error) }, { status: 500 });
+				}
+			},
+			PATCH: async (req) => {
+				try {
+					const body = await req.json();
+					const record = await DO.updateDnsRecord(req.params.domain, Number(req.params.id), body);
+					return Response.json(record);
+				} catch (error) {
+					return Response.json({ error: String(error) }, { status: 500 });
+				}
+			},
+			DELETE: async (req) => {
+				try {
+					await DO.deleteDnsRecord(req.params.domain, Number(req.params.id));
+					return Response.json({ success: true });
+				} catch (error) {
+					return Response.json({ error: String(error) }, { status: 500 });
+				}
+			},
+		},
+
+		'/api/do/dns-config': {
+			GET: () =>
+				Response.json({
+					recordTypes: DO.DNS_RECORD_TYPES,
+					recordDescriptions: DO.DNS_RECORD_DESCRIPTIONS,
+					defaultTtl: DO.DEFAULT_TTL,
+				}),
+		},
+
 		// ============ SSH / Servers ============
 
 		'/api/servers/:host/status': {

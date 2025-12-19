@@ -44,6 +44,31 @@ interface ServiceConfig {
 	docs: string;
 }
 
+interface Domain {
+	name: string;
+	ttl: number;
+	zone_file: string;
+}
+
+interface DnsRecord {
+	id: number;
+	type: string;
+	name: string;
+	data: string;
+	priority: number | null;
+	port: number | null;
+	ttl: number;
+	weight: number | null;
+	flags: number | null;
+	tag: string | null;
+}
+
+interface DnsConfig {
+	recordTypes: string[];
+	recordDescriptions: Record<string, string>;
+	defaultTtl: number;
+}
+
 interface ServerInfo {
 	hostname: string;
 	os: string;
@@ -1750,9 +1775,622 @@ function TailscalePage() {
 	);
 }
 
+// ============ DNS Page ============
+
+function DNSPage({ droplets }: { droplets: Droplet[] }) {
+	const [domains, setDomains] = useState<Domain[]>([]);
+	const [selectedDomain, setSelectedDomain] = useState<string | null>(null);
+	const [records, setRecords] = useState<DnsRecord[]>([]);
+	const [dnsConfig, setDnsConfig] = useState<DnsConfig | null>(null);
+	const [loading, setLoading] = useState(true);
+	const [loadingRecords, setLoadingRecords] = useState(false);
+	const [error, setError] = useState('');
+	const [showAddDomain, setShowAddDomain] = useState(false);
+	const [showAddRecord, setShowAddRecord] = useState(false);
+	const [showEditRecord, setShowEditRecord] = useState<DnsRecord | null>(null);
+	const [filter, setFilter] = useState('');
+
+	const [domainForm, setDomainForm] = useState({ name: '', ip_address: '' });
+	const [recordForm, setRecordForm] = useState({
+		type: 'A',
+		name: '@',
+		data: '',
+		ttl: 1800,
+		priority: 10,
+		port: 0,
+		weight: 100,
+		flags: 0,
+		tag: 'issue',
+	});
+
+	const fetchDomains = async () => {
+		setLoading(true);
+		try {
+			const [domainsData, configData] = await Promise.all([
+				api<Domain[]>('/do/domains'),
+				api<DnsConfig>('/do/dns-config'),
+			]);
+			setDomains(domainsData);
+			setDnsConfig(configData);
+		} catch (err) {
+			setError(String(err));
+		} finally {
+			setLoading(false);
+		}
+	};
+
+	const fetchRecords = async (domain: string) => {
+		setLoadingRecords(true);
+		try {
+			const recordsData = await api<DnsRecord[]>(`/do/domains/${domain}/records`);
+			setRecords(recordsData);
+		} catch (err) {
+			setError(String(err));
+		} finally {
+			setLoadingRecords(false);
+		}
+	};
+
+	useEffect(() => {
+		fetchDomains();
+	}, []);
+
+	useEffect(() => {
+		if (selectedDomain) {
+			fetchRecords(selectedDomain);
+		}
+	}, [selectedDomain]);
+
+	const handleAddDomain = async () => {
+		if (!domainForm.name) {
+			setError('Domain name is required');
+			return;
+		}
+		setError('');
+		try {
+			await api('/do/domains', {
+				method: 'POST',
+				body: JSON.stringify(domainForm),
+			});
+			setShowAddDomain(false);
+			setDomainForm({ name: '', ip_address: '' });
+			fetchDomains();
+		} catch (err) {
+			setError(String(err));
+		}
+	};
+
+	const handleDeleteDomain = async (name: string) => {
+		if (!confirm(`Delete domain "${name}" and ALL its records? This cannot be undone!`)) return;
+		try {
+			await api(`/do/domains/${name}`, { method: 'DELETE' });
+			if (selectedDomain === name) {
+				setSelectedDomain(null);
+				setRecords([]);
+			}
+			fetchDomains();
+		} catch (err) {
+			alert(`Failed to delete: ${err}`);
+		}
+	};
+
+	const handleAddRecord = async () => {
+		if (!recordForm.data) {
+			setError('Data/value is required');
+			return;
+		}
+		setError('');
+		try {
+			const payload: any = {
+				type: recordForm.type,
+				name: recordForm.name,
+				data: recordForm.data,
+				ttl: recordForm.ttl,
+			};
+			if (['MX', 'SRV'].includes(recordForm.type)) payload.priority = recordForm.priority;
+			if (recordForm.type === 'SRV') {
+				payload.port = recordForm.port;
+				payload.weight = recordForm.weight;
+			}
+			if (recordForm.type === 'CAA') {
+				payload.flags = recordForm.flags;
+				payload.tag = recordForm.tag;
+			}
+
+			await api(`/do/domains/${selectedDomain}/records`, {
+				method: 'POST',
+				body: JSON.stringify(payload),
+			});
+			setShowAddRecord(false);
+			setRecordForm({ ...recordForm, name: '@', data: '' });
+			fetchRecords(selectedDomain!);
+		} catch (err) {
+			setError(String(err));
+		}
+	};
+
+	const handleUpdateRecord = async () => {
+		if (!showEditRecord) return;
+		setError('');
+		try {
+			await api(`/do/domains/${selectedDomain}/records/${showEditRecord.id}`, {
+				method: 'PATCH',
+				body: JSON.stringify({
+					name: recordForm.name,
+					data: recordForm.data,
+					ttl: recordForm.ttl,
+				}),
+			});
+			setShowEditRecord(null);
+			fetchRecords(selectedDomain!);
+		} catch (err) {
+			setError(String(err));
+		}
+	};
+
+	const handleDeleteRecord = async (id: number) => {
+		if (!confirm('Delete this DNS record?')) return;
+		try {
+			await api(`/do/domains/${selectedDomain}/records/${id}`, { method: 'DELETE' });
+			fetchRecords(selectedDomain!);
+		} catch (err) {
+			alert(`Failed to delete: ${err}`);
+		}
+	};
+
+	const startEditRecord = (record: DnsRecord) => {
+		setRecordForm({
+			type: record.type,
+			name: record.name,
+			data: record.data,
+			ttl: record.ttl,
+			priority: record.priority || 10,
+			port: record.port || 0,
+			weight: record.weight || 100,
+			flags: record.flags || 0,
+			tag: record.tag || 'issue',
+		});
+		setShowEditRecord(record);
+	};
+
+	const copyToClipboard = (text: string) => {
+		navigator.clipboard.writeText(text);
+	};
+
+	const getPublicIP = (d: Droplet) => d.networks.v4.find((n) => n.type === 'public')?.ip_address || '';
+
+	const filteredRecords = records.filter((r) => {
+		if (!filter) return true;
+		const search = filter.toLowerCase();
+		return (
+			r.type.toLowerCase().includes(search) ||
+			r.name.toLowerCase().includes(search) ||
+			r.data.toLowerCase().includes(search)
+		);
+	});
+
+	const groupedRecords: Record<string, DnsRecord[]> = {};
+	for (const r of filteredRecords) {
+		if (!groupedRecords[r.type]) groupedRecords[r.type] = [];
+		groupedRecords[r.type].push(r);
+	}
+
+	return (
+		<div className="page">
+			<div className="page-header">
+				<h2>DNS Management</h2>
+				<div className="page-actions">
+					<button onClick={fetchDomains} className="btn btn-secondary">
+						Refresh
+					</button>
+					<button onClick={() => setShowAddDomain(true)} className="btn btn-primary">
+						Add Domain
+					</button>
+				</div>
+			</div>
+
+			{error && <div className="error">{error}</div>}
+
+			{showAddDomain && (
+				<Card title="Add Domain">
+					<div className="form-grid">
+						<div className="form-group">
+							<label>Domain Name *</label>
+							<input
+								type="text"
+								value={domainForm.name}
+								onChange={(e) => setDomainForm({ ...domainForm, name: e.target.value })}
+								placeholder="example.com"
+							/>
+						</div>
+						<div className="form-group">
+							<label>Initial IP (optional A record)</label>
+							<div style={{ display: 'flex', gap: '0.5rem' }}>
+								<input
+									type="text"
+									value={domainForm.ip_address}
+									onChange={(e) => setDomainForm({ ...domainForm, ip_address: e.target.value })}
+									placeholder="1.2.3.4"
+									style={{ flex: 1 }}
+								/>
+								{droplets.length > 0 && (
+									<select
+										onChange={(e) => setDomainForm({ ...domainForm, ip_address: e.target.value })}
+										style={{ width: 'auto' }}
+									>
+										<option value="">From droplet...</option>
+										{droplets.map((d) => {
+											const ip = getPublicIP(d);
+											return ip ? (
+												<option key={d.id} value={ip}>
+													{d.name}
+												</option>
+											) : null;
+										})}
+									</select>
+								)}
+							</div>
+						</div>
+					</div>
+					<p className="text-muted" style={{ margin: '1rem 0' }}>
+						After adding, update your registrar's nameservers to:<br />
+						<code>ns1.digitalocean.com</code>, <code>ns2.digitalocean.com</code>, <code>ns3.digitalocean.com</code>
+					</p>
+					<div className="form-actions">
+						<button onClick={() => setShowAddDomain(false)} className="btn btn-secondary">
+							Cancel
+						</button>
+						<button onClick={handleAddDomain} className="btn btn-primary">
+							Add Domain
+						</button>
+					</div>
+				</Card>
+			)}
+
+			{loading ? (
+				<LoadingSpinner />
+			) : (
+				<div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+					{/* Domains List */}
+					<Card title={`Domains (${domains.length})`}>
+						{domains.length === 0 ? (
+							<p className="text-muted">No domains found. Add a domain to get started.</p>
+						) : (
+							<div className="table-container">
+								<table>
+									<thead>
+										<tr>
+											<th>Domain</th>
+											<th>TTL</th>
+											<th>Actions</th>
+										</tr>
+									</thead>
+									<tbody>
+										{domains.map((d) => (
+											<tr key={d.name} className={selectedDomain === d.name ? 'selected' : ''}>
+												<td>
+													<button
+														onClick={() => setSelectedDomain(d.name)}
+														className="btn btn-link"
+														style={{ padding: 0, textAlign: 'left' }}
+													>
+														<strong>{d.name}</strong>
+													</button>
+												</td>
+												<td>{d.ttl}s</td>
+												<td>
+													<div className="action-buttons">
+														<button
+															onClick={() => setSelectedDomain(d.name)}
+															className="btn btn-sm btn-secondary"
+														>
+															Records
+														</button>
+														<button
+															onClick={() => handleDeleteDomain(d.name)}
+															className="btn btn-sm btn-danger"
+														>
+															Delete
+														</button>
+													</div>
+												</td>
+											</tr>
+										))}
+									</tbody>
+								</table>
+							</div>
+						)}
+					</Card>
+
+					{/* Records Panel */}
+					{selectedDomain && (
+						<div style={{ flex: 1, minWidth: '500px' }}>
+							<Card
+								title={`Records: ${selectedDomain}`}
+								actions={
+									<button onClick={() => setShowAddRecord(true)} className="btn btn-sm btn-primary">
+										Add Record
+									</button>
+								}
+							>
+								<div style={{ marginBottom: '1rem' }}>
+									<input
+										type="text"
+										value={filter}
+										onChange={(e) => setFilter(e.target.value)}
+										placeholder="Filter records..."
+										style={{ width: '100%', maxWidth: '300px' }}
+									/>
+								</div>
+
+								{showAddRecord && (
+									<div style={{ background: '#1a1a2e', padding: '1rem', borderRadius: '8px', marginBottom: '1rem' }}>
+										<h4 style={{ marginBottom: '1rem' }}>Add Record</h4>
+										<div className="form-grid">
+											<div className="form-group">
+												<label>Type</label>
+												<select
+													value={recordForm.type}
+													onChange={(e) => setRecordForm({ ...recordForm, type: e.target.value })}
+												>
+													{dnsConfig?.recordTypes.map((t) => (
+														<option key={t} value={t}>
+															{t} - {dnsConfig.recordDescriptions[t]}
+														</option>
+													))}
+												</select>
+											</div>
+											<div className="form-group">
+												<label>Name</label>
+												<input
+													type="text"
+													value={recordForm.name}
+													onChange={(e) => setRecordForm({ ...recordForm, name: e.target.value })}
+													placeholder="@ or subdomain"
+												/>
+											</div>
+											<div className="form-group">
+												<label>
+													{recordForm.type === 'A' ? 'IPv4 Address' :
+													 recordForm.type === 'AAAA' ? 'IPv6 Address' :
+													 recordForm.type === 'CNAME' ? 'Target hostname' :
+													 recordForm.type === 'MX' ? 'Mail server' :
+													 recordForm.type === 'TXT' ? 'Text value' :
+													 'Data'}
+												</label>
+												<div style={{ display: 'flex', gap: '0.5rem' }}>
+													<input
+														type="text"
+														value={recordForm.data}
+														onChange={(e) => setRecordForm({ ...recordForm, data: e.target.value })}
+														placeholder={
+															recordForm.type === 'A' ? '1.2.3.4' :
+															recordForm.type === 'CNAME' ? 'example.com.' :
+															recordForm.type === 'MX' ? 'mail.example.com.' :
+															recordForm.type === 'TXT' ? 'v=spf1 ...' :
+															''
+														}
+														style={{ flex: 1 }}
+													/>
+													{recordForm.type === 'A' && droplets.length > 0 && (
+														<select
+															onChange={(e) => setRecordForm({ ...recordForm, data: e.target.value })}
+															style={{ width: 'auto' }}
+														>
+															<option value="">Droplet...</option>
+															{droplets.map((d) => {
+																const ip = getPublicIP(d);
+																return ip ? (
+																	<option key={d.id} value={ip}>
+																		{d.name}
+																	</option>
+																) : null;
+															})}
+														</select>
+													)}
+												</div>
+											</div>
+											<div className="form-group">
+												<label>TTL (seconds)</label>
+												<input
+													type="number"
+													value={recordForm.ttl}
+													onChange={(e) => setRecordForm({ ...recordForm, ttl: parseInt(e.target.value) })}
+												/>
+											</div>
+											{['MX', 'SRV'].includes(recordForm.type) && (
+												<div className="form-group">
+													<label>Priority</label>
+													<input
+														type="number"
+														value={recordForm.priority}
+														onChange={(e) => setRecordForm({ ...recordForm, priority: parseInt(e.target.value) })}
+													/>
+												</div>
+											)}
+											{recordForm.type === 'SRV' && (
+												<>
+													<div className="form-group">
+														<label>Port</label>
+														<input
+															type="number"
+															value={recordForm.port}
+															onChange={(e) => setRecordForm({ ...recordForm, port: parseInt(e.target.value) })}
+														/>
+													</div>
+													<div className="form-group">
+														<label>Weight</label>
+														<input
+															type="number"
+															value={recordForm.weight}
+															onChange={(e) => setRecordForm({ ...recordForm, weight: parseInt(e.target.value) })}
+														/>
+													</div>
+												</>
+											)}
+											{recordForm.type === 'CAA' && (
+												<>
+													<div className="form-group">
+														<label>Flags</label>
+														<select
+															value={recordForm.flags}
+															onChange={(e) => setRecordForm({ ...recordForm, flags: parseInt(e.target.value) })}
+														>
+															<option value={0}>0 - Non-critical</option>
+															<option value={128}>128 - Critical</option>
+														</select>
+													</div>
+													<div className="form-group">
+														<label>Tag</label>
+														<select
+															value={recordForm.tag}
+															onChange={(e) => setRecordForm({ ...recordForm, tag: e.target.value })}
+														>
+															<option value="issue">issue</option>
+															<option value="issuewild">issuewild</option>
+															<option value="iodef">iodef</option>
+														</select>
+													</div>
+												</>
+											)}
+										</div>
+										<div className="form-actions">
+											<button onClick={() => setShowAddRecord(false)} className="btn btn-secondary">
+												Cancel
+											</button>
+											<button onClick={handleAddRecord} className="btn btn-primary">
+												Add Record
+											</button>
+										</div>
+									</div>
+								)}
+
+								{showEditRecord && (
+									<div style={{ background: '#1a1a2e', padding: '1rem', borderRadius: '8px', marginBottom: '1rem' }}>
+										<h4 style={{ marginBottom: '1rem' }}>Edit Record (ID: {showEditRecord.id})</h4>
+										<div className="form-grid">
+											<div className="form-group">
+												<label>Type</label>
+												<input type="text" value={showEditRecord.type} disabled />
+											</div>
+											<div className="form-group">
+												<label>Name</label>
+												<input
+													type="text"
+													value={recordForm.name}
+													onChange={(e) => setRecordForm({ ...recordForm, name: e.target.value })}
+												/>
+											</div>
+											<div className="form-group">
+												<label>Data</label>
+												<input
+													type="text"
+													value={recordForm.data}
+													onChange={(e) => setRecordForm({ ...recordForm, data: e.target.value })}
+												/>
+											</div>
+											<div className="form-group">
+												<label>TTL</label>
+												<input
+													type="number"
+													value={recordForm.ttl}
+													onChange={(e) => setRecordForm({ ...recordForm, ttl: parseInt(e.target.value) })}
+												/>
+											</div>
+										</div>
+										<div className="form-actions">
+											<button onClick={() => setShowEditRecord(null)} className="btn btn-secondary">
+												Cancel
+											</button>
+											<button onClick={handleUpdateRecord} className="btn btn-primary">
+												Update
+											</button>
+										</div>
+									</div>
+								)}
+
+								{loadingRecords ? (
+									<LoadingSpinner />
+								) : (
+									<div>
+										{Object.keys(groupedRecords).sort().map((type) => (
+											<div key={type} style={{ marginBottom: '1.5rem' }}>
+												<h4 style={{ color: '#58a6ff', marginBottom: '0.5rem' }}>
+													{type} Records ({groupedRecords[type].length})
+												</h4>
+												<div className="table-container">
+													<table>
+														<thead>
+															<tr>
+																<th>Name</th>
+																<th>Value</th>
+																<th>TTL</th>
+																{type === 'MX' && <th>Priority</th>}
+																<th>Actions</th>
+															</tr>
+														</thead>
+														<tbody>
+															{groupedRecords[type].map((r) => (
+																<tr key={r.id}>
+																	<td>
+																		<strong>{r.name === '@' ? selectedDomain : `${r.name}.${selectedDomain}`}</strong>
+																	</td>
+																	<td className="mono" style={{ fontSize: '0.875rem', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+																		{r.data}
+																	</td>
+																	<td>{r.ttl}s</td>
+																	{type === 'MX' && <td>{r.priority}</td>}
+																	<td>
+																		<div className="action-buttons">
+																			<button
+																				onClick={() => copyToClipboard(r.data)}
+																				className="btn btn-sm btn-secondary"
+																				title="Copy value"
+																			>
+																				Copy
+																			</button>
+																			{!['NS', 'SOA'].includes(r.type) && (
+																				<>
+																					<button
+																						onClick={() => startEditRecord(r)}
+																						className="btn btn-sm btn-secondary"
+																					>
+																						Edit
+																					</button>
+																					<button
+																						onClick={() => handleDeleteRecord(r.id)}
+																						className="btn btn-sm btn-danger"
+																					>
+																						Del
+																					</button>
+																				</>
+																			)}
+																		</div>
+																	</td>
+																</tr>
+															))}
+														</tbody>
+													</table>
+												</div>
+											</div>
+										))}
+										{Object.keys(groupedRecords).length === 0 && (
+											<p className="text-muted">No records found. Add a record to get started.</p>
+										)}
+									</div>
+								)}
+							</Card>
+						</div>
+					)}
+				</div>
+			)}
+		</div>
+	);
+}
+
 // ============ Main App ============
 
-type Page = 'overview' | 'droplets' | 'services' | 'ssh-keys' | 'setup' | 'ssh-config' | 'tailscale' | 'databases';
+type Page = 'overview' | 'droplets' | 'services' | 'ssh-keys' | 'setup' | 'ssh-config' | 'tailscale' | 'databases' | 'dns';
 
 function App() {
 	const [page, setPage] = useState<Page>('overview');
@@ -1792,6 +2430,7 @@ function App() {
 	const navItems: { id: Page; label: string }[] = [
 		{ id: 'overview', label: 'Overview' },
 		{ id: 'droplets', label: 'Droplets' },
+		{ id: 'dns', label: 'DNS' },
 		{ id: 'setup', label: 'Setup' },
 		{ id: 'tailscale', label: 'Tailscale' },
 		{ id: 'databases', label: 'Databases' },
@@ -1828,6 +2467,7 @@ function App() {
 						onRefresh={fetchData}
 					/>
 				)}
+				{page === 'dns' && <DNSPage droplets={droplets} />}
 				{page === 'setup' && <SetupPage droplets={droplets} />}
 				{page === 'tailscale' && <TailscalePage />}
 				{page === 'databases' && <DatabasesPage />}

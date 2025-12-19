@@ -1,5 +1,5 @@
 # Redis - Shared instance for multiple services
-# Access: Internal only (no public port)
+# Access: Tailscale network
 # Docs: https://redis.io/documentation
 
 services:

@@ -85,6 +85,7 @@ async function digitalOceanMenu(): Promise<void> {
 			{ name: '📋  List Droplets', value: 'list' },
 			{ name: '➕  Create Droplet', value: 'create' },
 			{ name: '🗑️  Delete Droplet', value: 'delete' },
+			{ name: '🌐  DNS Management', value: 'dns' },
 			{ name: '🔑  SSH Keys', value: 'sshkeys' },
 			{ name: '💰  Billing', value: 'billing' },
 			{ name: '←   Back', value: 'back' },
@@ -100,6 +101,9 @@ async function digitalOceanMenu(): Promise<void> {
 			break;
 		case 'delete':
 			await deleteDroplet();
+			break;
+		case 'dns':
+			await dnsMenu();
 			break;
 		case 'sshkeys':
 			await sshKeysMenu();
@@ -354,6 +358,576 @@ async function showBilling(): Promise<void> {
 		console.log(`\n  ${chalk.dim('Estimated Monthly Cost:')} ${chalk.bold('$' + monthlyTotal.toFixed(2))}`);
 	} catch (error) {
 		log.error(`Failed to fetch billing: ${error}`);
+	}
+
+	await input({ message: 'Press Enter to continue...' });
+}
+
+// ============ DNS Menu ============
+
+async function dnsMenu(): Promise<void> {
+	console.clear();
+	log.header('🌐 DNS Management');
+
+	const choice = await select({
+		message: 'DNS Options:',
+		choices: [
+			{ name: '📋  List Domains', value: 'list' },
+			{ name: '➕  Add Domain', value: 'add' },
+			{ name: '📝  Manage Records', value: 'records' },
+			{ name: '🗑️  Delete Domain', value: 'delete' },
+			{ name: '←   Back', value: 'back' },
+		],
+	});
+
+	switch (choice) {
+		case 'list':
+			await listDomains();
+			break;
+		case 'add':
+			await addDomain();
+			break;
+		case 'records':
+			await manageRecords();
+			break;
+		case 'delete':
+			await deleteDomainPrompt();
+			break;
+		case 'back':
+			return;
+	}
+
+	await dnsMenu();
+}
+
+async function listDomains(): Promise<void> {
+	log.step('Fetching domains...');
+	try {
+		const domains = await DO.listDomains();
+
+		if (domains.length === 0) {
+			log.warn('No domains found');
+		} else {
+			console.log('\n' + chalk.bold('Your Domains:'));
+			console.log(chalk.dim('─'.repeat(60)));
+
+			for (const d of domains) {
+				console.log(`  ${chalk.bold(d.name)}`);
+				console.log(`    ${chalk.dim('TTL:')} ${d.ttl}s`);
+				console.log();
+			}
+		}
+	} catch (error) {
+		log.error(`Failed to list domains: ${error}`);
+	}
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function addDomain(): Promise<void> {
+	log.header('Add Domain');
+
+	try {
+		const name = await input({
+			message: 'Domain name (e.g., example.com):',
+			validate: (v) => {
+				if (!v) return 'Domain name is required';
+				if (!/^[a-zA-Z0-9][a-zA-Z0-9-_.]+\.[a-zA-Z]{2,}$/.test(v)) {
+					return 'Invalid domain format';
+				}
+				return true;
+			},
+		});
+
+		const addIp = await confirm({
+			message: 'Add an A record pointing to an IP address?',
+			default: false,
+		});
+
+		let ipAddress: string | undefined;
+		if (addIp) {
+			ipAddress = await input({
+				message: 'IP address:',
+				validate: (v) => {
+					if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v)) {
+						return 'Invalid IP address format';
+					}
+					return true;
+				},
+			});
+		}
+
+		log.step('Adding domain...');
+		const domain = await DO.createDomain(name, ipAddress);
+		log.success(`Domain added: ${domain.name}`);
+
+		console.log(chalk.bold('\nNext Steps:'));
+		console.log('  1. Update your domain registrar to use DigitalOcean nameservers:');
+		console.log(chalk.cyan('     ns1.digitalocean.com'));
+		console.log(chalk.cyan('     ns2.digitalocean.com'));
+		console.log(chalk.cyan('     ns3.digitalocean.com'));
+		console.log('  2. DNS propagation may take up to 48 hours');
+	} catch (error) {
+		log.error(`Failed to add domain: ${error}`);
+	}
+
+	await input({ message: '\nPress Enter to continue...' });
+}
+
+async function deleteDomainPrompt(): Promise<void> {
+	log.header('Delete Domain');
+
+	try {
+		const domains = await DO.listDomains();
+
+		if (domains.length === 0) {
+			log.warn('No domains found');
+			await input({ message: 'Press Enter to go back...' });
+			return;
+		}
+
+		const domainName = await select({
+			message: 'Select domain to delete:',
+			choices: [
+				...domains.map((d) => ({ name: d.name, value: d.name })),
+				{ name: '← Cancel', value: '' },
+			],
+		});
+
+		if (!domainName) return;
+
+		const confirmDelete = await confirm({
+			message: chalk.red(`Are you sure you want to DELETE "${domainName}" and ALL its records? This cannot be undone!`),
+			default: false,
+		});
+
+		if (!confirmDelete) {
+			log.warn('Cancelled');
+			return;
+		}
+
+		log.step('Deleting domain...');
+		await DO.deleteDomain(domainName);
+		log.success('Domain deleted');
+	} catch (error) {
+		log.error(`Failed to delete domain: ${error}`);
+	}
+
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function manageRecords(): Promise<void> {
+	try {
+		const domains = await DO.listDomains();
+
+		if (domains.length === 0) {
+			log.warn('No domains found. Add a domain first.');
+			await input({ message: 'Press Enter to go back...' });
+			return;
+		}
+
+		const domainName = await select({
+			message: 'Select domain:',
+			choices: [
+				...domains.map((d) => ({ name: d.name, value: d.name })),
+				{ name: '← Cancel', value: '' },
+			],
+		});
+
+		if (!domainName) return;
+
+		await recordsMenu(domainName);
+	} catch (error) {
+		log.error(`Failed to load domains: ${error}`);
+		await input({ message: 'Press Enter to continue...' });
+	}
+}
+
+async function recordsMenu(domain: string): Promise<void> {
+	console.clear();
+	log.header(`📝 DNS Records: ${domain}`);
+
+	const choice = await select({
+		message: 'Record Options:',
+		choices: [
+			{ name: '📋  List Records', value: 'list' },
+			{ name: '➕  Add Record', value: 'add' },
+			{ name: '✏️  Edit Record', value: 'edit' },
+			{ name: '🗑️  Delete Record', value: 'delete' },
+			{ name: '⚡  Quick Add (A/CNAME)', value: 'quick' },
+			{ name: '←   Back', value: 'back' },
+		],
+	});
+
+	switch (choice) {
+		case 'list':
+			await listRecords(domain);
+			break;
+		case 'add':
+			await addRecord(domain);
+			break;
+		case 'edit':
+			await editRecord(domain);
+			break;
+		case 'delete':
+			await deleteRecord(domain);
+			break;
+		case 'quick':
+			await quickAddRecord(domain);
+			break;
+		case 'back':
+			return;
+	}
+
+	await recordsMenu(domain);
+}
+
+async function listRecords(domain: string): Promise<void> {
+	log.step('Fetching records...');
+	try {
+		const records = await DO.listDnsRecords(domain);
+
+		// Group by type
+		const grouped: Record<string, typeof records> = {};
+		for (const r of records) {
+			if (!grouped[r.type]) grouped[r.type] = [];
+			grouped[r.type].push(r);
+		}
+
+		console.log('\n' + chalk.bold(`DNS Records for ${domain}:`));
+		console.log(chalk.dim('─'.repeat(80)));
+
+		for (const type of Object.keys(grouped).sort()) {
+			console.log(chalk.bold.cyan(`\n${type} Records:`));
+			for (const r of grouped[type]) {
+				const name = r.name === '@' ? domain : `${r.name}.${domain}`;
+				let info = `  ${chalk.bold(name)} → ${r.data}`;
+
+				if (r.priority !== null) info += ` (priority: ${r.priority})`;
+				if (r.port !== null) info += ` (port: ${r.port})`;
+				info += chalk.dim(` [TTL: ${r.ttl}s, ID: ${r.id}]`);
+
+				console.log(info);
+			}
+		}
+
+		console.log();
+	} catch (error) {
+		log.error(`Failed to list records: ${error}`);
+	}
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function addRecord(domain: string): Promise<void> {
+	log.header('Add DNS Record');
+
+	try {
+		const type = await select({
+			message: 'Record type:',
+			choices: DO.DNS_RECORD_TYPES.map((t) => ({
+				name: `${t} - ${DO.DNS_RECORD_DESCRIPTIONS[t]}`,
+				value: t,
+			})),
+		});
+
+		const name = await input({
+			message: 'Name (@ for root, or subdomain):',
+			default: '@',
+		});
+
+		let data = '';
+		let priority: number | undefined;
+		let port: number | undefined;
+		let weight: number | undefined;
+		let flags: number | undefined;
+		let tag: string | undefined;
+
+		switch (type) {
+			case 'A':
+				data = await input({
+					message: 'IPv4 Address:',
+					validate: (v) => /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v) || 'Invalid IPv4',
+				});
+				break;
+			case 'AAAA':
+				data = await input({
+					message: 'IPv6 Address:',
+					validate: (v) => v.includes(':') || 'Invalid IPv6',
+				});
+				break;
+			case 'CNAME':
+				data = await input({
+					message: 'Target hostname (e.g., example.com.):',
+					validate: (v) => v.length > 0 || 'Target is required',
+				});
+				if (!data.endsWith('.')) data += '.';
+				break;
+			case 'MX':
+				data = await input({
+					message: 'Mail server hostname:',
+					validate: (v) => v.length > 0 || 'Hostname is required',
+				});
+				if (!data.endsWith('.')) data += '.';
+				priority = parseInt(
+					await input({
+						message: 'Priority (lower = higher priority):',
+						default: '10',
+					})
+				);
+				break;
+			case 'TXT':
+				data = await input({
+					message: 'Text value:',
+					validate: (v) => v.length > 0 || 'Value is required',
+				});
+				break;
+			case 'NS':
+				data = await input({
+					message: 'Nameserver hostname:',
+					validate: (v) => v.length > 0 || 'Hostname is required',
+				});
+				if (!data.endsWith('.')) data += '.';
+				break;
+			case 'SRV':
+				data = await input({
+					message: 'Target hostname:',
+					validate: (v) => v.length > 0 || 'Target is required',
+				});
+				priority = parseInt(await input({ message: 'Priority:', default: '10' }));
+				weight = parseInt(await input({ message: 'Weight:', default: '100' }));
+				port = parseInt(await input({ message: 'Port:', validate: (v) => !isNaN(parseInt(v)) || 'Invalid port' }));
+				break;
+			case 'CAA':
+				flags = parseInt(await input({ message: 'Flags (0 or 128):', default: '0' }));
+				tag = await select({
+					message: 'Tag:',
+					choices: [
+						{ name: 'issue - Authorize CA to issue certificates', value: 'issue' },
+						{ name: 'issuewild - Authorize CA for wildcard certificates', value: 'issuewild' },
+						{ name: 'iodef - Report policy violations', value: 'iodef' },
+					],
+				});
+				data = await input({
+					message: 'Value (e.g., letsencrypt.org):',
+					validate: (v) => v.length > 0 || 'Value is required',
+				});
+				break;
+		}
+
+		const ttl = parseInt(
+			await input({
+				message: 'TTL in seconds:',
+				default: String(DO.DEFAULT_TTL),
+			})
+		);
+
+		log.step('Creating record...');
+		const record = await DO.createDnsRecord(domain, {
+			type,
+			name,
+			data,
+			ttl,
+			priority,
+			port,
+			weight,
+			flags,
+			tag,
+		});
+		log.success(`Record created (ID: ${record.id})`);
+	} catch (error) {
+		log.error(`Failed to create record: ${error}`);
+	}
+
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function editRecord(domain: string): Promise<void> {
+	log.header('Edit DNS Record');
+
+	try {
+		const records = await DO.listDnsRecords(domain);
+		const editableRecords = records.filter((r) => r.type !== 'SOA' && r.type !== 'NS');
+
+		if (editableRecords.length === 0) {
+			log.warn('No editable records found');
+			await input({ message: 'Press Enter to go back...' });
+			return;
+		}
+
+		const recordId = await select({
+			message: 'Select record to edit:',
+			choices: [
+				...editableRecords.map((r) => ({
+					name: `${r.type} | ${r.name === '@' ? domain : r.name + '.' + domain} → ${r.data}`,
+					value: r.id,
+				})),
+				{ name: '← Cancel', value: 0 },
+			],
+		});
+
+		if (recordId === 0) return;
+
+		const record = editableRecords.find((r) => r.id === recordId)!;
+
+		console.log(chalk.dim('\nCurrent values:'));
+		console.log(`  Type: ${record.type}`);
+		console.log(`  Name: ${record.name}`);
+		console.log(`  Data: ${record.data}`);
+		console.log(`  TTL: ${record.ttl}`);
+		console.log();
+
+		const newName = await input({
+			message: 'New name (leave empty to keep current):',
+			default: '',
+		});
+
+		const newData = await input({
+			message: 'New data/value (leave empty to keep current):',
+			default: '',
+		});
+
+		const newTtl = await input({
+			message: 'New TTL (leave empty to keep current):',
+			default: '',
+		});
+
+		const updates: DO.UpdateDnsRecordOptions = {};
+		if (newName) updates.name = newName;
+		if (newData) updates.data = newData;
+		if (newTtl) updates.ttl = parseInt(newTtl);
+
+		if (Object.keys(updates).length === 0) {
+			log.warn('No changes made');
+			return;
+		}
+
+		log.step('Updating record...');
+		await DO.updateDnsRecord(domain, recordId, updates);
+		log.success('Record updated');
+	} catch (error) {
+		log.error(`Failed to edit record: ${error}`);
+	}
+
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function deleteRecord(domain: string): Promise<void> {
+	log.header('Delete DNS Record');
+
+	try {
+		const records = await DO.listDnsRecords(domain);
+		const deletableRecords = records.filter((r) => r.type !== 'SOA' && r.type !== 'NS');
+
+		if (deletableRecords.length === 0) {
+			log.warn('No deletable records found');
+			await input({ message: 'Press Enter to go back...' });
+			return;
+		}
+
+		const recordId = await select({
+			message: 'Select record to delete:',
+			choices: [
+				...deletableRecords.map((r) => ({
+					name: `${r.type} | ${r.name === '@' ? domain : r.name + '.' + domain} → ${r.data}`,
+					value: r.id,
+				})),
+				{ name: '← Cancel', value: 0 },
+			],
+		});
+
+		if (recordId === 0) return;
+
+		const record = deletableRecords.find((r) => r.id === recordId)!;
+
+		const confirmDelete = await confirm({
+			message: chalk.red(`Delete ${record.type} record "${record.name}" → "${record.data}"?`),
+			default: false,
+		});
+
+		if (!confirmDelete) {
+			log.warn('Cancelled');
+			return;
+		}
+
+		log.step('Deleting record...');
+		await DO.deleteDnsRecord(domain, recordId);
+		log.success('Record deleted');
+	} catch (error) {
+		log.error(`Failed to delete record: ${error}`);
+	}
+
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function quickAddRecord(domain: string): Promise<void> {
+	log.header('Quick Add Record');
+
+	try {
+		const type = await select({
+			message: 'Record type:',
+			choices: [
+				{ name: 'A - Point subdomain to IP', value: 'A' as const },
+				{ name: 'CNAME - Alias to another domain', value: 'CNAME' as const },
+			],
+		});
+
+		const name = await input({
+			message: 'Subdomain (e.g., www, api, @):',
+			default: '@',
+		});
+
+		let data: string;
+		if (type === 'A') {
+			// Offer to use existing droplet IPs
+			const droplets = await DO.listDroplets();
+			const activeDroplets = droplets.filter((d) => d.status === 'active');
+
+			if (activeDroplets.length > 0) {
+				const useDroplet = await confirm({
+					message: 'Use IP from an existing droplet?',
+					default: true,
+				});
+
+				if (useDroplet) {
+					const dropletId = await select({
+						message: 'Select droplet:',
+						choices: activeDroplets.map((d) => ({
+							name: `${d.name} (${DO.getPublicIP(d)})`,
+							value: d.id,
+						})),
+					});
+					data = DO.getPublicIP(activeDroplets.find((d) => d.id === dropletId)!)!;
+				} else {
+					data = await input({
+						message: 'IPv4 Address:',
+						validate: (v) => /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v) || 'Invalid IP',
+					});
+				}
+			} else {
+				data = await input({
+					message: 'IPv4 Address:',
+					validate: (v) => /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v) || 'Invalid IP',
+				});
+			}
+		} else {
+			data = await input({
+				message: 'Target hostname:',
+				validate: (v) => v.length > 0 || 'Required',
+			});
+			if (!data.endsWith('.')) data += '.';
+		}
+
+		log.step('Creating record...');
+		const record = await DO.createDnsRecord(domain, {
+			type,
+			name,
+			data,
+			ttl: DO.DEFAULT_TTL,
+		});
+
+		log.success(`Created: ${name === '@' ? domain : name + '.' + domain} → ${data}`);
+		log.info(`Record ID: ${record.id}`);
+	} catch (error) {
+		log.error(`Failed to create record: ${error}`);
 	}
 
 	await input({ message: 'Press Enter to continue...' });

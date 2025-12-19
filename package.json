@@ -7,6 +7,10 @@
   "peerDependencies": {
     "typescript": "^5"
   },
+  "scripts": {
+    "run": "bun src/cli.ts",
+    "web": "bun --watch src/web/server.ts"
+  },
   "dependencies": {
     "@inquirer/prompts": "^8.0.2",
     "@types/react": "^19.2.7",

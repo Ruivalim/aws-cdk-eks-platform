@@ -1,0 +1,23 @@
+# Docker Registry - Private image registry
+# Access: Tailscale network
+# Docs: https://docs.docker.com/registry/
+
+services:
+  registry:
+    image: registry:2
+    container_name: registry
+    restart: unless-stopped
+    environment:
+      - REGISTRY_STORAGE_DELETE_ENABLED=true
+    volumes:
+      - registry-data:/var/lib/registry
+    ports:
+      - "5000:5000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5000/v2/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  registry-data:

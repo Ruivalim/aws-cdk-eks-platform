@@ -1,179 +1,138 @@
 # Coolify Infrastructure
 
-Este repositório contém configurações e scripts para gerenciar a infraestrutura Coolify.
+Tooling para gerenciar infraestrutura Coolify: criar droplets no Digital Ocean, configurar servidores com Docker/Tailscale/iptables, provisionar databases e fazer deploy de serviços.
 
-## Servidor Principal (doserver)
-
-- **SSH**: `ssh doserver`
-- **Tailscale IP**: `100.77.201.55`
-- **OS**: Ubuntu 25.04
-- **Recursos**: 4GB RAM, 77GB disco
-
-### Containers de Infraestrutura Coolify
-
-| Container | Imagem | IP Interno |
-|-----------|--------|------------|
-| coolify | ghcr.io/coollabsio/coolify:4.0.0-beta.454 | 10.0.1.10 |
-| coolify-db | postgres:15-alpine | 10.0.1.7 |
-| coolify-redis | redis:7-alpine | 10.0.1.5 |
-| coolify-proxy | traefik:v3.6 | 10.0.1.11 |
-| coolify-realtime | ghcr.io/coollabsio/coolify-realtime:1.0.10 | 10.0.1.2 |
-| coolify-sentinel | ghcr.io/coollabsio/sentinel:0.0.18 | - |
-
-### Bancos Centrais (para apps)
-
-| Serviço | Container | IP Interno | Porta |
-|---------|-----------|------------|-------|
-| **Postgres** | `hwcwo0ckc08k00g40socsc48` | 10.0.1.9 | 5432 |
-| **Redis** | `sg8oc044koow0ckwkggwc844` | 10.0.1.3 | 6379 |
-| pgAdmin | `pgadmin-k8cok4sww8c8oo4kwg0cwgwg` | 10.0.1.6 | - |
-
-**Postgres Central:**
-- User: `postgres`
-- Databases existentes: `financas`, `finance`, `gestao_extraordinario`, `logto`
-
-**Redis Central:**
-- DB 0: em uso (115 keys)
-- DBs 1-15: disponíveis para novos serviços
-
-### IMPORTANTE: Expor Portas para Multi-Servidor
-
-Por padrão, Postgres e Redis **não estão expostos** na porta do host (só acessíveis dentro da rede Docker).
-
-Para permitir acesso de servidores child via Tailscale, você precisa expor as portas no Coolify:
-
-1. **No Coolify Dashboard**: Vá em cada serviço (Postgres/Redis)
-2. **Aba "Network"**: Adicione port mapping `5432:5432` (Postgres) ou `6379:6379` (Redis)
-3. **Ou via docker-compose**: Adicione na seção `ports:`
-
-```yaml
-ports:
-  - "5432:5432"  # Expõe para o host
-```
-
-Sem isso, conexões via `100.77.201.55:5432` não funcionarão!
-
-### Rede Docker
-
-Todos os containers estão na rede `coolify` (10.0.1.0/24). Serviços podem se conectar usando:
-- Nome do container como hostname (ex: `hwcwo0ckc08k00g40socsc48`)
-- IP interno (ex: `10.0.1.9`)
-
-## Scripts de Setup
-
-| Script | Descrição |
-|--------|-----------|
-| `bun setup-coolify-master.ts` | Configura servidor master Coolify com Docker, Tailscale, iptables |
-| `bun setup-coolify-adjacent.ts` | Configura servidor adicional para cluster Coolify |
-| `bun setup-databases.ts` | Cria databases/users no Postgres central para novos serviços |
-
-## Docker Composes
-
-Cada pasta contém:
-- `docker-compose.yml` - versão standalone (com Postgres/Redis próprios)
-- `docker-compose.adjacent.yml` - versão para usar bancos centrais
-
-### Serviços Disponíveis
-
-| Serviço | Usa Postgres | Usa Redis | Pasta |
-|---------|-------------|-----------|-------|
-| Outline (Wiki) | Sim | Sim (DB 0) | `outline/` |
-| Hoppscotch (API Testing) | Sim | Não | `hoppscotch/` |
-| Glitchtip (Error Tracking) | Sim | Sim (DB 1) | `glitchtip/` |
-| Soketi (WebSocket) | Não | Sim (DB 2) | `soketi/` |
-| n8n (Automation) | Sim | Sim (DB 3) | `n8n/` |
-| Plausible (Analytics) | Sim | Não* | `plausible/` |
-| Umami (Simple Analytics) | Sim | Não | `umami/` |
-| Cal.com (Scheduling) | Sim | Não | `calcom/` |
-| Typebot (Chatbot) | Sim | Não | `typebot/` |
-| MinIO (S3 Storage) | Não | Não | `minio/` |
-| Uptime Kuma (Monitoring) | Não | Não | `uptime-kuma/` |
-| Backrest (Backup) | Não | Não | `backrest/` |
-| CloudBeaver (DB Admin) | Não | Não | `cloudbeaver/` |
-| Redis Insight | Não | Não | `redis-insight/` |
-| Nitropage (CMS) | SQLite | Não | `nitropage/` |
-
-*Plausible precisa de ClickHouse local para eventos
-
-## Conexão aos Bancos Centrais
-
-Para serviços na rede `coolify`:
-
-```env
-# Postgres
-DATABASE_URL=postgres://USER:PASS@hwcwo0ckc08k00g40socsc48:5432/DATABASE
-
-# Redis
-REDIS_URL=redis://sg8oc044koow0ckwkggwc844:6379/DB_NUMBER
-```
-
-Para serviços em outros servidores (via Tailscale):
-
-```env
-# Postgres
-DATABASE_URL=postgres://USER:PASS@100.77.201.55:5432/DATABASE
-
-# Redis
-REDIS_URL=redis://100.77.201.55:6379/DB_NUMBER
-```
-
-## Multi-Servidor (Cluster)
-
-### Arquitetura
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Tailscale Network                        │
-│                                                             │
-│  ┌─────────────────────┐      ┌─────────────────────┐      │
-│  │   doserver (master) │      │  doserver-child-1   │      │
-│  │   100.77.201.55     │◄────►│   100.x.x.x         │      │
-│  │                     │      │                     │      │
-│  │  ┌───────────────┐  │      │  ┌───────────────┐  │      │
-│  │  │ Postgres      │  │      │  │ App (ex:      │  │      │
-│  │  │ Redis         │◄─┼──────┼──┤ Outline)      │  │      │
-│  │  │ Coolify       │  │      │  │               │  │      │
-│  │  └───────────────┘  │      │  └───────────────┘  │      │
-│  └─────────────────────┘      └─────────────────────┘      │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Diferença de Conexão
-
-| Cenário | Hostname | Exemplo |
-|---------|----------|---------|
-| Mesmo servidor (doserver) | Nome do container | `hwcwo0ckc08k00g40socsc48:5432` |
-| Outro servidor (child) | IP Tailscale | `100.77.201.55:5432` |
-
-### Arquivos de Configuração
-
-Cada serviço tem:
-- `.env.child-1` - configuração para rodar em servidor secundário (usa IP Tailscale)
-- `docker-compose.adjacent.yml` - compose que usa bancos centrais
-
-### Setup de Servidor Child
+## Uso
 
 ```bash
-# 1. Configurar o novo servidor
-bun setup-coolify-adjacent.ts --ssh-host root@IP_NOVO_SERVIDOR
+# CLI interativa
+bun src/cli.ts
 
-# 2. Criar databases necessários (roda no master)
-bun setup-databases.ts --ssh-host doserver
-
-# 3. No Coolify, adicionar o novo servidor usando IP Tailscale
-
-# 4. Deploy do app no servidor child usando .env.child-1
+# Web dashboard (http://localhost:3456)
+bun run web
 ```
+
+## Estrutura do Projeto
+
+```
+src/
+├── cli.ts              # CLI interativa principal
+├── lib/
+│   ├── digitalocean.ts # Cliente API Digital Ocean (droplets, SSH keys, billing)
+│   ├── ssh.ts          # Utilitários SSH (executar comandos, info do servidor, containers)
+│   ├── services.ts     # Catálogo de serviços (Outline, n8n, Glitchtip, etc.)
+│   └── log.ts          # Funções de logging colorido com chalk
+└── web/
+    ├── server.ts       # Servidor Bun com API REST completa
+    ├── frontend.tsx    # Dashboard React (SPA com todas as páginas)
+    ├── index.html      # Entry point HTML
+    └── styles.css      # Estilos do dashboard
+
+# Scripts standalone (rodam via CLI ou diretamente)
+setup-coolify-master.ts    # Configura servidor master com Docker, Tailscale, iptables
+setup-coolify-adjacent.ts  # Configura servidor child para cluster
+setup-databases.ts         # Cria databases/users no Postgres central
+
+# Docker Composes por serviço
+outline/
+hoppscotch/
+glitchtip/
+soketi/
+n8n/
+plausible/
+umami/
+calcom/
+typebot/
+minio/
+uptime-kuma/
+backrest/
+cloudbeaver/
+redis-insight/
+nitropage/
+```
+
+## src/lib/
+
+### `digitalocean.ts`
+Cliente para API Digital Ocean. Funções para:
+- Listar/criar/deletar droplets
+- Gerenciar SSH keys
+- Obter billing e account info
+- Presets de regions, sizes e images
+- **DNS**: listar/criar/deletar domínios e records (A, AAAA, CNAME, MX, TXT, NS, SRV, CAA)
+
+### `ssh.ts`
+Utilitários para executar comandos via SSH:
+- `ssh(host, command)` - executa comando e retorna stdout/stderr/exitCode
+- `getServerInfo(host)` - retorna info do servidor (OS, memory, disk, Docker, Tailscale)
+- `getDockerContainers(host)` - lista containers rodando
+
+### `services.ts`
+Catálogo de serviços disponíveis com metadata:
+- Quais precisam de Postgres/Redis
+- Redis DB number reservado
+- Portas expostas
+- Links para docs
+
+### `log.ts`
+Funções de logging colorido: `log.info()`, `log.success()`, `log.error()`, etc.
+
+## src/web/
+
+### `server.ts`
+Servidor Bun.serve() com API REST:
+- `/api/do/*` - Digital Ocean (droplets, SSH keys, billing)
+- `/api/do/domains/*` - DNS (domínios e records)
+- `/api/servers/:host/*` - Status e containers via SSH
+- `/api/databases` - Listar/criar databases no Postgres central
+- `/api/tailscale/status` - Status da rede Tailscale
+- `/api/local/ssh-config` - Gerenciar ~/.ssh/config local
+- `/api/provision/full-setup-stream` - Setup completo com SSE
+
+### `frontend.tsx`
+Dashboard React com páginas:
+- Overview (billing, droplets summary)
+- Droplets (criar, deletar, reboot)
+- DNS (domínios e records - A, CNAME, MX, TXT, etc.)
+- Setup (configurar novo servidor para cluster)
+- Tailscale (peers online, IPs)
+- Databases (listar, criar, connection strings)
+- SSH Config (gerenciar ~/.ssh/config)
+- Services (catálogo disponível)
+
+## Servidor Principal (coolify-master)
+
+- **SSH**: `ssh coolify-master`
+- **Tailscale IP**: `100.77.201.55`
+
+### Bancos Centrais
+
+| Serviço  | Container                  | Porta |
+| -------- | -------------------------- | ----- |
+| Postgres | `hwcwo0ckc08k00g40socsc48` | 5432  |
+| Redis    | `sg8oc044koow0ckwkggwc844` | 6379  |
 
 ### Redis DBs Reservados
 
-| DB | Serviço |
-|----|---------|
-| 0 | Outline / Apps gerais |
-| 1 | Glitchtip |
-| 2 | Soketi |
-| 3 | n8n |
-| 4-15 | Disponíveis |
+| DB   | Serviço   |
+| ---- | --------- |
+| 0    | Outline   |
+| 1    | Glitchtip |
+| 2    | Soketi    |
+| 3    | n8n       |
+| 4-15 | Livres    |
+
+## Conexão aos Bancos
+
+```env
+# Mesmo servidor (rede Docker)
+DATABASE_URL=postgres://USER:PASS@hwcwo0ckc08k00g40socsc48:5432/DATABASE
+REDIS_URL=redis://sg8oc044koow0ckwkggwc844:6379/0
+
+# Outro servidor (via Tailscale)
+DATABASE_URL=postgres://USER:PASS@100.77.201.55:5432/DATABASE
+REDIS_URL=redis://100.77.201.55:6379/0
+```
 
 ---
 
