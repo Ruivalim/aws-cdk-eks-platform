@@ -1,6 +1,9 @@
 # Docker Registry - Private image registry
-# Access: Tailscale network
 # Docs: https://docs.docker.com/registry/
+#
+# Para gerar o hash da senha:
+#   htpasswd -nb admin suasenha | sed 's/\$/\$\$/g'
+# Copie o resultado e cole no REGISTRY_AUTH_USERS abaixo
 
 services:
   registry:
@@ -11,13 +14,21 @@ services:
       - REGISTRY_STORAGE_DELETE_ENABLED=true
     volumes:
       - registry-data:/var/lib/registry
-    ports:
-      - "5000:5000"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5000/v2/"]
       interval: 30s
       timeout: 10s
       retries: 3
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.registry.rule=Host(`registry.ruivalim.com`)"
+      - "traefik.http.routers.registry.entrypoints=https"
+      - "traefik.http.routers.registry.tls=true"
+      - "traefik.http.routers.registry.tls.certresolver=letsencrypt"
+      - "traefik.http.services.registry.loadbalancer.server.port=5000"
+      # Basic Auth - gere com: htpasswd -nb user senha | sed 's/\$/\$\$/g'
+      - "traefik.http.routers.registry.middlewares=registry-auth"
+      - "traefik.http.middlewares.registry-auth.basicauth.users=admin:$$apr1$$mh4wHiqz$$AFRrksmTQC/8FSTieAp9M."
 
 volumes:
   registry-data:
