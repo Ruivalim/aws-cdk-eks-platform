@@ -345,8 +345,9 @@ function DropletsPage({
 							</select>
 						</div>
 						<div className="form-group full-width">
-							<label>SSH Keys</label>
+							<label>SSH Keys {sshKeys.length === 0 && <span className="text-muted">(loading...)</span>}</label>
 							<div className="checkbox-group">
+								{sshKeys.length === 0 && <span className="text-muted">No SSH keys found</span>}
 								{sshKeys.map((key) => (
 									<label key={key.id} className="checkbox-label">
 										<input
@@ -364,6 +365,16 @@ function DropletsPage({
 									</label>
 								))}
 							</div>
+							{sshKeys.length > 0 && form.ssh_keys.length === 0 && (
+								<button
+									type="button"
+									className="btn btn-sm btn-secondary"
+									style={{ marginTop: '0.5rem' }}
+									onClick={() => setForm({ ...form, ssh_keys: sshKeys.map((k) => k.id) })}
+								>
+									Select All
+								</button>
+							)}
 						</div>
 					</div>
 					<div className="form-actions">
@@ -658,9 +669,1090 @@ function SSHKeysPage({
 	);
 }
 
+interface SetupResult {
+	step: string;
+	success: boolean;
+	output: string;
+	skipped?: boolean;
+}
+
+interface SetupResponse {
+	success: boolean;
+	sshHost: string;
+	tailscaleIp: string;
+	masterTailscaleIp: string;
+	needsTailscaleAuth: boolean;
+	results: SetupResult[];
+	nextSteps: string[];
+	error?: string;
+}
+
+interface StreamStep {
+	step: string;
+	status: 'running' | 'done' | 'error' | 'skipped';
+	output?: string;
+}
+
+function SetupPage({ droplets }: { droplets: Droplet[] }) {
+	const [sshHost, setSshHost] = useState('');
+	const [running, setRunning] = useState(false);
+	const [steps, setSteps] = useState<StreamStep[]>([]);
+	const [result, setResult] = useState<{ tailscaleIp: string; needsAuth: boolean; authUrl?: string } | null>(null);
+	const [error, setError] = useState('');
+
+	const getPublicIP = (d: Droplet) => d.networks.v4.find((n) => n.type === 'public')?.ip_address || '';
+
+	const handleSetup = async () => {
+		if (!sshHost) {
+			setError('SSH host is required');
+			return;
+		}
+		setError('');
+		setResult(null);
+		setSteps([]);
+		setRunning(true);
+
+		try {
+			const response = await fetch('/api/provision/full-setup-stream', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ sshHost }),
+			});
+
+			const reader = response.body?.getReader();
+			if (!reader) throw new Error('No reader');
+
+			const decoder = new TextDecoder();
+			let buffer = '';
+
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+
+				buffer += decoder.decode(value, { stream: true });
+				const lines = buffer.split('\n\n');
+				buffer = lines.pop() || '';
+
+				for (const line of lines) {
+					if (line.startsWith('data: ')) {
+						const data = JSON.parse(line.slice(6));
+
+						if (data.type === 'step') {
+							setSteps((prev) => {
+								const existing = prev.findIndex((s) => s.step === data.step);
+								if (existing >= 0) {
+									const updated = [...prev];
+									updated[existing] = data;
+									return updated;
+								}
+								return [...prev, data];
+							});
+						} else if (data.type === 'auth') {
+							setResult((prev) => ({ ...prev, needsAuth: true, authUrl: data.url, tailscaleIp: '' }));
+						} else if (data.type === 'done') {
+							setResult({ tailscaleIp: data.tailscaleIp, needsAuth: data.needsAuth });
+						}
+					}
+				}
+			}
+		} catch (err) {
+			setError(String(err));
+		} finally {
+			setRunning(false);
+		}
+	};
+
+	return (
+		<div className="page">
+			<h2>Coolify Server Setup</h2>
+			<p className="text-muted" style={{ marginBottom: '1.5rem' }}>
+				Configure a new server for Coolify cluster (Docker, Tailscale, iptables)
+			</p>
+
+			<Card title="Setup New Server">
+				{error && <div className="error">{error}</div>}
+
+				<div className="form-group">
+					<label>SSH Host</label>
+					<div style={{ display: 'flex', gap: '0.5rem' }}>
+						<input
+							type="text"
+							value={sshHost}
+							onChange={(e) => setSshHost(e.target.value)}
+							placeholder="root@1.2.3.4"
+							style={{ flex: 1 }}
+						/>
+						{droplets.length > 0 && (
+							<select
+								onChange={(e) => {
+									if (e.target.value) setSshHost(`root@${e.target.value}`);
+								}}
+								style={{ width: 'auto' }}
+							>
+								<option value="">Select droplet...</option>
+								{droplets.map((d) => {
+									const ip = getPublicIP(d);
+									return ip ? (
+										<option key={d.id} value={ip}>
+											{d.name} ({ip})
+										</option>
+									) : null;
+								})}
+							</select>
+						)}
+					</div>
+				</div>
+
+				<div className="form-actions">
+					<button onClick={handleSetup} className="btn btn-primary" disabled={running}>
+						{running ? 'Running Setup...' : 'Run Full Setup'}
+					</button>
+				</div>
+			</Card>
+
+			{(running || steps.length > 0) && (
+				<Card title={running ? 'Running Setup...' : 'Setup Steps'}>
+					<div className="table-container">
+						<table>
+							<thead>
+								<tr>
+									<th>Step</th>
+									<th>Status</th>
+									<th>Output</th>
+								</tr>
+							</thead>
+							<tbody>
+								{steps.map((s, i) => (
+									<tr key={i}>
+										<td>
+											<strong>{s.step}</strong>
+										</td>
+										<td>
+											{s.status === 'running' && <span className="badge badge-warning">running</span>}
+											{s.status === 'done' && <span className="badge badge-success">done</span>}
+											{s.status === 'error' && <span className="badge badge-error">error</span>}
+											{s.status === 'skipped' && <span className="badge badge-default">skipped</span>}
+										</td>
+										<td className="mono" style={{ fontSize: '0.75rem', maxWidth: '400px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+											{s.output?.includes('https://') ? (
+												<a href={s.output} target="_blank" rel="noopener noreferrer" style={{ color: '#58a6ff' }}>
+													{s.output}
+												</a>
+											) : (
+												s.output || '-'
+											)}
+										</td>
+									</tr>
+								))}
+							</tbody>
+						</table>
+					</div>
+				</Card>
+			)}
+
+			{result?.authUrl && (
+				<Card title="Tailscale Authentication Required">
+					<p>Click the link below to authenticate Tailscale:</p>
+					<a href={result.authUrl} target="_blank" rel="noopener noreferrer" className="btn btn-primary" style={{ marginTop: '0.5rem' }}>
+						Open Tailscale Auth
+					</a>
+					<p className="text-muted" style={{ marginTop: '1rem' }}>After authenticating, run setup again to complete configuration.</p>
+				</Card>
+			)}
+
+			{result && !running && result.tailscaleIp && (
+				<Card title="Setup Complete">
+					<div className="stats-grid">
+						<Stat label="Tailscale IP" value={result.tailscaleIp} />
+						<Stat label="Master IP" value="100.77.201.55" />
+					</div>
+					<div style={{ marginTop: '1rem' }}>
+						<strong>Next Steps:</strong>
+						<ul style={{ marginTop: '0.5rem', paddingLeft: '1.5rem' }}>
+							<li>Add server in Coolify using IP: <code>{result.tailscaleIp}</code></li>
+							<li>User: root, Port: 22</li>
+						</ul>
+					</div>
+				</Card>
+			)}
+		</div>
+	);
+}
+
+// ============ SSH Config Page ============
+
+interface LocalSSHKey {
+	name: string;
+	path: string;
+	content: string;
+}
+
+interface SSHConfigHost {
+	name: string;
+	hostname: string;
+	user: string;
+	port: string;
+	identityFile: string;
+	identitiesOnly: boolean;
+	addKeysToAgent: boolean;
+	useKeychain: boolean;
+	isWildcard: boolean;
+	comment: string;
+	raw: string[];
+}
+
+function SSHConfigPage() {
+	const [hosts, setHosts] = useState<SSHConfigHost[]>([]);
+	const [localKeys, setLocalKeys] = useState<LocalSSHKey[]>([]);
+	const [rawConfig, setRawConfig] = useState('');
+	const [loading, setLoading] = useState(true);
+	const [showAdd, setShowAdd] = useState(false);
+	const [showEdit, setShowEdit] = useState(false);
+	const [editingRaw, setEditingRaw] = useState('');
+	const [form, setForm] = useState({
+		name: '',
+		hostname: '',
+		user: 'root',
+		port: '',
+		identityFile: '',
+		identitiesOnly: false,
+	});
+	const [error, setError] = useState('');
+	const [filter, setFilter] = useState('');
+
+	const fetchData = async () => {
+		setLoading(true);
+		try {
+			const [configRes, keysRes] = await Promise.all([
+				api<{ hosts: SSHConfigHost[]; raw: string }>('/local/ssh-config'),
+				api<LocalSSHKey[]>('/local/ssh-keys'),
+			]);
+			setHosts(configRes.hosts);
+			setRawConfig(configRes.raw);
+			setLocalKeys(keysRes);
+		} catch (err) {
+			console.error(err);
+		} finally {
+			setLoading(false);
+		}
+	};
+
+	useEffect(() => {
+		fetchData();
+	}, []);
+
+	const handleAdd = async () => {
+		if (!form.name) {
+			setError('Host alias is required');
+			return;
+		}
+		setError('');
+		try {
+			await api('/local/ssh-config', {
+				method: 'POST',
+				body: JSON.stringify(form),
+			});
+			setShowAdd(false);
+			setForm({ name: '', hostname: '', user: 'root', port: '', identityFile: '', identitiesOnly: false });
+			fetchData();
+		} catch (err) {
+			setError(String(err));
+		}
+	};
+
+	const handleSaveRaw = async () => {
+		try {
+			await api('/local/ssh-config', {
+				method: 'PUT',
+				body: JSON.stringify({ raw: editingRaw }),
+			});
+			setShowEdit(false);
+			fetchData();
+		} catch (err) {
+			alert(`Failed to save: ${err}`);
+		}
+	};
+
+	const handleDelete = async (name: string) => {
+		if (!confirm(`Remove host "${name}" from SSH config?`)) return;
+		try {
+			await api(`/local/ssh-config/${name}`, { method: 'DELETE' });
+			fetchData();
+		} catch (err) {
+			alert(`Failed: ${err}`);
+		}
+	};
+
+	const copyToClipboard = (text: string) => {
+		navigator.clipboard.writeText(text);
+	};
+
+	const filteredHosts = hosts.filter((h) => {
+		if (!filter) return true;
+		const search = filter.toLowerCase();
+		return (
+			h.name.toLowerCase().includes(search) ||
+			h.hostname.toLowerCase().includes(search) ||
+			h.user.toLowerCase().includes(search) ||
+			h.comment.toLowerCase().includes(search)
+		);
+	});
+
+	const serverHosts = filteredHosts.filter((h) => !h.isWildcard && !['github.com', 'bitbucket.org', 'ssh.dev.azure.com'].includes(h.name));
+	const gitHosts = filteredHosts.filter((h) => ['github.com', 'bitbucket.org', 'ssh.dev.azure.com'].includes(h.name));
+	const wildcardHosts = filteredHosts.filter((h) => h.isWildcard);
+
+	return (
+		<div className="page">
+			<div className="page-header">
+				<h2>SSH Config</h2>
+				<div className="page-actions">
+					<button onClick={() => { setEditingRaw(rawConfig); setShowEdit(true); }} className="btn btn-secondary">
+						Edit Raw
+					</button>
+					<button onClick={() => setShowAdd(true)} className="btn btn-primary">
+						Add Host
+					</button>
+				</div>
+			</div>
+
+			<div style={{ marginBottom: '1rem' }}>
+				<input
+					type="text"
+					value={filter}
+					onChange={(e) => setFilter(e.target.value)}
+					placeholder="Filter hosts..."
+					style={{ width: '100%', maxWidth: '300px' }}
+				/>
+			</div>
+
+			{showEdit && (
+				<Card title="Edit SSH Config">
+					<textarea
+						value={editingRaw}
+						onChange={(e) => setEditingRaw(e.target.value)}
+						style={{ width: '100%', minHeight: '400px', fontFamily: 'monospace', fontSize: '0.875rem' }}
+					/>
+					<div className="form-actions">
+						<button onClick={() => setShowEdit(false)} className="btn btn-secondary">Cancel</button>
+						<button onClick={handleSaveRaw} className="btn btn-primary">Save</button>
+					</div>
+				</Card>
+			)}
+
+			{showAdd && (
+				<Card title="Add SSH Host">
+					{error && <div className="error">{error}</div>}
+					<div className="form-grid">
+						<div className="form-group">
+							<label>Host Alias *</label>
+							<input
+								type="text"
+								value={form.name}
+								onChange={(e) => setForm({ ...form, name: e.target.value })}
+								placeholder="worker1"
+							/>
+						</div>
+						<div className="form-group">
+							<label>HostName (IP or domain)</label>
+							<input
+								type="text"
+								value={form.hostname}
+								onChange={(e) => setForm({ ...form, hostname: e.target.value })}
+								placeholder="100.x.x.x"
+							/>
+						</div>
+						<div className="form-group">
+							<label>User</label>
+							<input
+								type="text"
+								value={form.user}
+								onChange={(e) => setForm({ ...form, user: e.target.value })}
+								placeholder="root"
+							/>
+						</div>
+						<div className="form-group">
+							<label>Port</label>
+							<input
+								type="text"
+								value={form.port}
+								onChange={(e) => setForm({ ...form, port: e.target.value })}
+								placeholder="22 (default)"
+							/>
+						</div>
+						<div className="form-group">
+							<label>Identity File</label>
+							<select
+								value={form.identityFile}
+								onChange={(e) => setForm({ ...form, identityFile: e.target.value })}
+							>
+								<option value="">Default</option>
+								{localKeys.map((k) => (
+									<option key={k.path} value={k.path.replace('.pub', '')}>
+										{k.name}
+									</option>
+								))}
+							</select>
+						</div>
+						<div className="form-group">
+							<label className="checkbox-label" style={{ marginTop: '1.5rem' }}>
+								<input
+									type="checkbox"
+									checked={form.identitiesOnly}
+									onChange={(e) => setForm({ ...form, identitiesOnly: e.target.checked })}
+								/>
+								IdentitiesOnly
+							</label>
+						</div>
+					</div>
+					<div className="form-actions">
+						<button onClick={() => setShowAdd(false)} className="btn btn-secondary">Cancel</button>
+						<button onClick={handleAdd} className="btn btn-primary">Add</button>
+					</div>
+				</Card>
+			)}
+
+			{loading ? (
+				<LoadingSpinner />
+			) : (
+				<>
+					{serverHosts.length > 0 && (
+						<Card title={`Servers (${serverHosts.length})`}>
+							<div className="table-container">
+								<table>
+									<thead>
+										<tr>
+											<th>Alias</th>
+											<th>HostName</th>
+											<th>User</th>
+											<th>Port</th>
+											<th>Key</th>
+											<th>Actions</th>
+										</tr>
+									</thead>
+									<tbody>
+										{serverHosts.map((h) => (
+											<tr key={h.name}>
+												<td>
+													<strong>{h.name}</strong>
+													{h.comment && <div className="text-muted" style={{ fontSize: '0.75rem' }}>{h.comment}</div>}
+												</td>
+												<td className="mono">{h.hostname || '-'}</td>
+												<td>{h.user || '-'}</td>
+												<td>{h.port || '22'}</td>
+												<td className="mono" style={{ fontSize: '0.75rem' }}>
+													{h.identityFile ? h.identityFile.split('/').pop() : '-'}
+													{h.identitiesOnly && <span className="badge badge-info" style={{ marginLeft: '0.25rem' }}>only</span>}
+												</td>
+												<td>
+													<div className="action-buttons">
+														<button
+															onClick={() => copyToClipboard(`ssh ${h.name}`)}
+															className="btn btn-sm btn-secondary"
+															title="Copy SSH command"
+														>
+															Copy
+														</button>
+														<button
+															onClick={() => handleDelete(h.name)}
+															className="btn btn-sm btn-danger"
+														>
+															Del
+														</button>
+													</div>
+												</td>
+											</tr>
+										))}
+									</tbody>
+								</table>
+							</div>
+						</Card>
+					)}
+
+					{gitHosts.length > 0 && (
+						<Card title={`Git Services (${gitHosts.length})`}>
+							<div className="table-container">
+								<table>
+									<thead>
+										<tr>
+											<th>Host</th>
+											<th>Key</th>
+											<th>Options</th>
+										</tr>
+									</thead>
+									<tbody>
+										{gitHosts.map((h) => (
+											<tr key={h.name}>
+												<td><strong>{h.name}</strong></td>
+												<td className="mono" style={{ fontSize: '0.75rem' }}>
+													{h.identityFile ? h.identityFile.split('/').pop() : 'default'}
+												</td>
+												<td>
+													{h.addKeysToAgent && <span className="badge badge-default">AddKeysToAgent</span>}
+													{h.useKeychain && <span className="badge badge-default">UseKeychain</span>}
+												</td>
+											</tr>
+										))}
+									</tbody>
+								</table>
+							</div>
+						</Card>
+					)}
+
+					{wildcardHosts.length > 0 && (
+						<Card title="Global Settings">
+							{wildcardHosts.map((h) => (
+								<div key={h.name} style={{ marginBottom: '0.5rem' }}>
+									<code style={{ fontSize: '0.875rem' }}>{h.raw.join('\n')}</code>
+								</div>
+							))}
+						</Card>
+					)}
+
+					<Card title={`Local SSH Keys (${localKeys.length})`}>
+						{localKeys.length === 0 ? (
+							<p className="text-muted">No SSH keys found in ~/.ssh/</p>
+						) : (
+							<div className="table-container">
+								<table>
+									<thead>
+										<tr>
+											<th>Name</th>
+											<th>Type</th>
+											<th>Public Key</th>
+											<th>Actions</th>
+										</tr>
+									</thead>
+									<tbody>
+										{localKeys.map((k) => {
+											const keyType = k.content.split(' ')[0] || 'unknown';
+											return (
+												<tr key={k.name}>
+													<td><strong>{k.name}</strong></td>
+													<td><span className="badge badge-default">{keyType.replace('ssh-', '')}</span></td>
+													<td className="mono" style={{ fontSize: '0.75rem', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+														{k.content.slice(0, 50)}...
+													</td>
+													<td>
+														<button
+															onClick={() => copyToClipboard(k.content)}
+															className="btn btn-sm btn-secondary"
+														>
+															Copy
+														</button>
+													</td>
+												</tr>
+											);
+										})}
+									</tbody>
+								</table>
+							</div>
+						)}
+					</Card>
+				</>
+			)}
+		</div>
+	);
+}
+
+// ============ Databases Page ============
+
+interface PostgresServer {
+	host: string;
+	port: string;
+	user: string;
+	databases: Array<{ name: string; size: string; collation: string }>;
+	users: Array<{ name: string; is_superuser: boolean; can_create_db: boolean }>;
+	error?: string;
+}
+
+interface CreateDbResult {
+	success: boolean;
+	database: string;
+	user: string | null;
+	connectionStrings: {
+		standard: string;
+		jdbc: string;
+		dotenv: string;
+	};
+}
+
+function DatabasesPage() {
+	const [servers, setServers] = useState<PostgresServer[]>([]);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState('');
+	const [showCreate, setShowCreate] = useState(false);
+	const [createResult, setCreateResult] = useState<CreateDbResult | null>(null);
+	const [form, setForm] = useState({
+		dbName: '',
+		userName: '',
+		password: '',
+	});
+
+	const fetchData = async () => {
+		setLoading(true);
+		setError('');
+		try {
+			const res = await api<PostgresServer[]>('/databases');
+			setServers(res);
+		} catch (err) {
+			setError(String(err));
+		} finally {
+			setLoading(false);
+		}
+	};
+
+	useEffect(() => {
+		fetchData();
+	}, []);
+
+	const generatePassword = () => {
+		const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+		let result = '';
+		for (let i = 0; i < 24; i++) {
+			result += chars.charAt(Math.floor(Math.random() * chars.length));
+		}
+		setForm({ ...form, password: result });
+	};
+
+	const handleCreate = async () => {
+		if (!form.dbName) {
+			setError('Database name is required');
+			return;
+		}
+		setError('');
+		try {
+			const res = await api<CreateDbResult>('/databases/create', {
+				method: 'POST',
+				body: JSON.stringify(form),
+			});
+			setCreateResult(res);
+			setShowCreate(false);
+			setForm({ dbName: '', userName: '', password: '' });
+			fetchData();
+		} catch (err) {
+			setError(String(err));
+		}
+	};
+
+	const handleDrop = async (dbName: string) => {
+		if (!confirm(`DROP DATABASE "${dbName}"? This cannot be undone!`)) return;
+		try {
+			await api('/databases/drop', {
+				method: 'POST',
+				body: JSON.stringify({ dbName }),
+			});
+			fetchData();
+		} catch (err) {
+			alert(`Failed: ${err}`);
+		}
+	};
+
+	const copyToClipboard = (text: string) => {
+		navigator.clipboard.writeText(text);
+	};
+
+	return (
+		<div className="page">
+			<div className="page-header">
+				<h2>Databases</h2>
+				<button onClick={() => setShowCreate(true)} className="btn btn-primary">
+					Create Database
+				</button>
+			</div>
+
+			{error && <div className="error">{error}</div>}
+
+			{createResult && (
+				<Card title="Database Created!">
+					<div className="stats-grid">
+						<Stat label="Database" value={createResult.database} />
+						<Stat label="User" value={createResult.user || 'Using default'} />
+					</div>
+					<div style={{ marginTop: '1rem' }}>
+						<strong>Connection Strings:</strong>
+						<div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.5rem' }}>
+							<div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+								<code style={{ flex: 1, fontSize: '0.75rem', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+									{createResult.connectionStrings.dotenv}
+								</code>
+								<button onClick={() => copyToClipboard(createResult.connectionStrings.dotenv)} className="btn btn-sm btn-secondary">
+									Copy
+								</button>
+							</div>
+							<div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+								<code style={{ flex: 1, fontSize: '0.75rem', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+									{createResult.connectionStrings.jdbc}
+								</code>
+								<button onClick={() => copyToClipboard(createResult.connectionStrings.jdbc)} className="btn btn-sm btn-secondary">
+									JDBC
+								</button>
+							</div>
+						</div>
+					</div>
+					<div className="form-actions">
+						<button onClick={() => setCreateResult(null)} className="btn btn-secondary">
+							Dismiss
+						</button>
+					</div>
+				</Card>
+			)}
+
+			{showCreate && (
+				<Card title="Create Database">
+					<div className="form-grid">
+						<div className="form-group">
+							<label>Database Name *</label>
+							<input
+								type="text"
+								value={form.dbName}
+								onChange={(e) => setForm({ ...form, dbName: e.target.value })}
+								placeholder="my_app_db"
+							/>
+						</div>
+						<div className="form-group">
+							<label>User Name (optional)</label>
+							<input
+								type="text"
+								value={form.userName}
+								onChange={(e) => setForm({ ...form, userName: e.target.value })}
+								placeholder="my_app_user"
+							/>
+						</div>
+						<div className="form-group full-width">
+							<label>Password (required if user provided)</label>
+							<div style={{ display: 'flex', gap: '0.5rem' }}>
+								<input
+									type="text"
+									value={form.password}
+									onChange={(e) => setForm({ ...form, password: e.target.value })}
+									placeholder="secure_password"
+									style={{ flex: 1 }}
+								/>
+								<button onClick={generatePassword} className="btn btn-secondary">
+									Generate
+								</button>
+							</div>
+						</div>
+					</div>
+					<div className="form-actions">
+						<button onClick={() => setShowCreate(false)} className="btn btn-secondary">Cancel</button>
+						<button onClick={handleCreate} className="btn btn-primary">Create</button>
+					</div>
+				</Card>
+			)}
+
+			{loading ? (
+				<LoadingSpinner />
+			) : (
+				servers.map((server, idx) => (
+					<Card key={idx} title={`${server.host}:${server.port}`}>
+						{server.error ? (
+							<div className="error">{server.error}</div>
+						) : (
+							<>
+								<h4 style={{ marginBottom: '0.5rem' }}>Databases ({server.databases.length})</h4>
+								<div className="table-container">
+									<table>
+										<thead>
+											<tr>
+												<th>Name</th>
+												<th>Size</th>
+												<th>Actions</th>
+											</tr>
+										</thead>
+										<tbody>
+											{server.databases.map((db) => (
+												<tr key={db.name}>
+													<td><strong>{db.name}</strong></td>
+													<td>{db.size}</td>
+													<td>
+														<div className="action-buttons">
+															<button
+																onClick={() => copyToClipboard(`postgresql://${server.user}:PASSWORD@${server.host}:${server.port}/${db.name}`)}
+																className="btn btn-sm btn-secondary"
+															>
+																Copy URL
+															</button>
+															{!['postgres', 'template0', 'template1'].includes(db.name) && (
+																<button
+																	onClick={() => handleDrop(db.name)}
+																	className="btn btn-sm btn-danger"
+																>
+																	Drop
+																</button>
+															)}
+														</div>
+													</td>
+												</tr>
+											))}
+										</tbody>
+									</table>
+								</div>
+
+								<h4 style={{ marginTop: '1.5rem', marginBottom: '0.5rem' }}>Users ({server.users.length})</h4>
+								<div className="table-container">
+									<table>
+										<thead>
+											<tr>
+												<th>Name</th>
+												<th>Roles</th>
+											</tr>
+										</thead>
+										<tbody>
+											{server.users.map((user) => (
+												<tr key={user.name}>
+													<td><strong>{user.name}</strong></td>
+													<td>
+														{user.is_superuser && <span className="badge badge-error">superuser</span>}
+														{user.can_create_db && <span className="badge badge-info">createdb</span>}
+													</td>
+												</tr>
+											))}
+										</tbody>
+									</table>
+								</div>
+							</>
+						)}
+					</Card>
+				))
+			)}
+		</div>
+	);
+}
+
+// ============ Tailscale Page ============
+
+interface TailscalePeer {
+	name: string;
+	dnsName: string;
+	tailscaleIP: string;
+	os: string;
+	online: boolean;
+	active: boolean;
+	lastSeen?: string;
+	exitNode?: boolean;
+}
+
+interface TailscaleStatus {
+	self: TailscalePeer;
+	peers: TailscalePeer[];
+	tailnetName: string;
+}
+
+function TailscalePage() {
+	const [status, setStatus] = useState<TailscaleStatus | null>(null);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState('');
+
+	const fetchStatus = async () => {
+		setLoading(true);
+		setError('');
+		try {
+			const res = await api<TailscaleStatus>('/tailscale/status');
+			setStatus(res);
+		} catch (err) {
+			setError(String(err));
+		} finally {
+			setLoading(false);
+		}
+	};
+
+	useEffect(() => {
+		fetchStatus();
+	}, []);
+
+	const copyToClipboard = (text: string) => {
+		navigator.clipboard.writeText(text);
+	};
+
+	const formatLastSeen = (lastSeen?: string) => {
+		if (!lastSeen) return '-';
+		const date = new Date(lastSeen);
+		const now = new Date();
+		const diff = now.getTime() - date.getTime();
+		const minutes = Math.floor(diff / 60000);
+		const hours = Math.floor(minutes / 60);
+		const days = Math.floor(hours / 24);
+
+		if (minutes < 1) return 'just now';
+		if (minutes < 60) return `${minutes}m ago`;
+		if (hours < 24) return `${hours}h ago`;
+		return `${days}d ago`;
+	};
+
+	const serverPeers = status?.peers.filter(p =>
+		p.os === 'linux' && !p.name.includes('phone') && !p.name.includes('iphone')
+	) || [];
+
+	const otherPeers = status?.peers.filter(p =>
+		p.os !== 'linux' || p.name.includes('phone') || p.name.includes('iphone')
+	) || [];
+
+	return (
+		<div className="page">
+			<div className="page-header">
+				<h2>Tailscale Network</h2>
+				<button onClick={fetchStatus} className="btn btn-secondary" disabled={loading}>
+					{loading ? 'Loading...' : 'Refresh'}
+				</button>
+			</div>
+
+			{error && <div className="error">{error}</div>}
+
+			{loading && !status ? (
+				<LoadingSpinner />
+			) : status ? (
+				<>
+					<Card title="This Machine">
+						<div className="stats-grid">
+							<Stat label="Hostname" value={status.self.name} />
+							<Stat label="Tailscale IP" value={status.self.tailscaleIP} />
+							<Stat label="MagicDNS" value={status.self.dnsName} />
+							<Stat label="Tailnet" value={status.tailnetName} />
+						</div>
+						<div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem' }}>
+							<button
+								onClick={() => copyToClipboard(status.self.tailscaleIP)}
+								className="btn btn-sm btn-secondary"
+							>
+								Copy IP
+							</button>
+							<button
+								onClick={() => copyToClipboard(status.self.dnsName)}
+								className="btn btn-sm btn-secondary"
+							>
+								Copy DNS
+							</button>
+						</div>
+					</Card>
+
+					{serverPeers.length > 0 && (
+						<Card title={`Servers (${serverPeers.length})`}>
+							<div className="table-container">
+								<table>
+									<thead>
+										<tr>
+											<th>Name</th>
+											<th>Tailscale IP</th>
+											<th>MagicDNS</th>
+											<th>Status</th>
+											<th>Actions</th>
+										</tr>
+									</thead>
+									<tbody>
+										{serverPeers.map((peer) => (
+											<tr key={peer.tailscaleIP}>
+												<td>
+													<strong>{peer.name}</strong>
+													<div className="text-muted" style={{ fontSize: '0.75rem' }}>{peer.os}</div>
+												</td>
+												<td className="mono">{peer.tailscaleIP}</td>
+												<td className="mono" style={{ fontSize: '0.875rem' }}>{peer.dnsName}</td>
+												<td>
+													{peer.online ? (
+														<span className="badge badge-success">online</span>
+													) : (
+														<span className="badge badge-error">offline</span>
+													)}
+													{peer.active && <span className="badge badge-info" style={{ marginLeft: '0.25rem' }}>active</span>}
+												</td>
+												<td>
+													<div className="action-buttons">
+														<button
+															onClick={() => copyToClipboard(peer.tailscaleIP)}
+															className="btn btn-sm btn-secondary"
+															title="Copy IP"
+														>
+															IP
+														</button>
+														<button
+															onClick={() => copyToClipboard(peer.dnsName)}
+															className="btn btn-sm btn-secondary"
+															title="Copy DNS"
+														>
+															DNS
+														</button>
+														<button
+															onClick={() => copyToClipboard(`ssh root@${peer.tailscaleIP}`)}
+															className="btn btn-sm btn-secondary"
+															title="Copy SSH command"
+														>
+															SSH
+														</button>
+													</div>
+												</td>
+											</tr>
+										))}
+									</tbody>
+								</table>
+							</div>
+						</Card>
+					)}
+
+					{otherPeers.length > 0 && (
+						<Card title={`Other Devices (${otherPeers.length})`}>
+							<div className="table-container">
+								<table>
+									<thead>
+										<tr>
+											<th>Name</th>
+											<th>OS</th>
+											<th>Tailscale IP</th>
+											<th>Status</th>
+											<th>Last Seen</th>
+										</tr>
+									</thead>
+									<tbody>
+										{otherPeers.map((peer) => (
+											<tr key={peer.tailscaleIP}>
+												<td><strong>{peer.name}</strong></td>
+												<td>{peer.os}</td>
+												<td className="mono">{peer.tailscaleIP}</td>
+												<td>
+													{peer.online ? (
+														<span className="badge badge-success">online</span>
+													) : (
+														<span className="badge badge-default">offline</span>
+													)}
+												</td>
+												<td className="text-muted">{formatLastSeen(peer.lastSeen)}</td>
+											</tr>
+										))}
+									</tbody>
+								</table>
+							</div>
+						</Card>
+					)}
+
+					<Card title="Quick Reference">
+						<p className="text-muted" style={{ marginBottom: '1rem' }}>
+							Use these URLs in your Coolify deployments to connect to services:
+						</p>
+						<div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+							{serverPeers.filter(p => p.online).map((peer) => (
+								<div key={peer.tailscaleIP} style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+									<strong style={{ minWidth: '150px' }}>{peer.name}</strong>
+									<code style={{ flex: 1 }}>{peer.dnsName}</code>
+									<button
+										onClick={() => copyToClipboard(peer.dnsName)}
+										className="btn btn-sm btn-secondary"
+									>
+										Copy
+									</button>
+								</div>
+							))}
+						</div>
+					</Card>
+				</>
+			) : null}
+		</div>
+	);
+}
+
 // ============ Main App ============
 
-type Page = 'overview' | 'droplets' | 'servers' | 'services' | 'ssh-keys';
+type Page = 'overview' | 'droplets' | 'services' | 'ssh-keys' | 'setup' | 'ssh-config' | 'tailscale' | 'databases';
 
 function App() {
 	const [page, setPage] = useState<Page>('overview');
@@ -700,9 +1792,12 @@ function App() {
 	const navItems: { id: Page; label: string }[] = [
 		{ id: 'overview', label: 'Overview' },
 		{ id: 'droplets', label: 'Droplets' },
-		{ id: 'servers', label: 'Servers' },
+		{ id: 'setup', label: 'Setup' },
+		{ id: 'tailscale', label: 'Tailscale' },
+		{ id: 'databases', label: 'Databases' },
+		{ id: 'ssh-config', label: 'SSH Config' },
 		{ id: 'services', label: 'Services' },
-		{ id: 'ssh-keys', label: 'SSH Keys' },
+		{ id: 'ssh-keys', label: 'DO Keys' },
 	];
 
 	return (
@@ -733,7 +1828,10 @@ function App() {
 						onRefresh={fetchData}
 					/>
 				)}
-				{page === 'servers' && <ServersPage />}
+				{page === 'setup' && <SetupPage droplets={droplets} />}
+				{page === 'tailscale' && <TailscalePage />}
+				{page === 'databases' && <DatabasesPage />}
+				{page === 'ssh-config' && <SSHConfigPage />}
 				{page === 'services' && <ServicesPage services={services} />}
 				{page === 'ssh-keys' && <SSHKeysPage sshKeys={sshKeys} loading={loading} onRefresh={fetchData} />}
 			</main>
