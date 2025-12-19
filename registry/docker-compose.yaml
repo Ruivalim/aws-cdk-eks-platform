@@ -21,13 +21,13 @@ services:
       retries: 3
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.registry.rule=Host(`registry.ruivalim.com`)"
+      - "traefik.http.routers.registry.rule=Host(`registry.ruivalim.com.br`)"
       - "traefik.http.routers.registry.entrypoints=https"
       - "traefik.http.routers.registry.tls=true"
       - "traefik.http.routers.registry.tls.certresolver=letsencrypt"
       - "traefik.http.services.registry.loadbalancer.server.port=5000"
       - "traefik.http.routers.registry.middlewares=registry-auth"
-      - "traefik.http.middlewares.registry-auth.basicauth.users=admin:$$apr1$$mh4wHiqz$$AFRrksmTQC/8FSTieAp9M."
+      - "traefik.http.middlewares.registry-auth.basicauth.users=admin:$$apr1$$tVhAM8M8$$T5J0bIM9Z0Mvi8mCBnm9l0"
 
 volumes:
   registry-data:
