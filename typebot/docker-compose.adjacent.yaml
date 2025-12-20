@@ -24,11 +24,11 @@ services:
 
       - DISABLE_SIGNUP=false
     ports:
-      - "3000:3000"
+      - '3000:3000'
     networks:
       - coolify
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:3000']
       interval: 30s
       timeout: 10s
       retries: 3
@@ -45,11 +45,11 @@ services:
       - NEXTAUTH_URL=${NEXTAUTH_URL}
       - NEXT_PUBLIC_VIEWER_URL=${NEXT_PUBLIC_VIEWER_URL}
     ports:
-      - "3001:3000"
+      - '3001:3000'
     networks:
       - coolify
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:3000']
       interval: 30s
       timeout: 10s
       retries: 3

@@ -65,11 +65,11 @@ services:
     volumes:
       - outline-data:/var/lib/outline/data
     ports:
-      - "3000:3000"
+      - '3000:3000'
     networks:
       - coolify
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/_health"]
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:3000/_health']
       interval: 30s
       timeout: 10s
       retries: 3

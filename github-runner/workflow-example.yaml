@@ -1,0 +1,37 @@
+# Exemplo de workflow - Copiar para .github/workflows/deploy.yaml no seu projeto
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-push:
+    runs-on: [self-hosted, coolify]
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to Registry
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login registry.ruivalim.com.br -u admin --password-stdin
+
+      - name: Build and Push
+        run: |
+          docker build -t registry.ruivalim.com.br/${{ github.repository }}:${{ github.sha }} .
+          docker build -t registry.ruivalim.com.br/${{ github.repository }}:latest .
+          docker push registry.ruivalim.com.br/${{ github.repository }}:${{ github.sha }}
+          docker push registry.ruivalim.com.br/${{ github.repository }}:latest
+
+      - name: Trigger Coolify Deploy
+        run: |
+          # Webhook do Coolify (pegar na interface do serviço)
+          curl -X POST "${{ secrets.COOLIFY_WEBHOOK_URL }}" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_API_TOKEN }}"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker logout registry.ruivalim.com.br
+          docker system prune -f

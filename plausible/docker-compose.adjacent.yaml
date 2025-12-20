@@ -24,11 +24,11 @@ services:
       - TOTP_VAULT_KEY=${TOTP_VAULT_KEY}
       - DISABLE_REGISTRATION=invite_only
     ports:
-      - "8000:8000"
+      - '8000:8000'
     networks:
       - coolify
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8000/api/health"]
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:8000/api/health']
       interval: 30s
       timeout: 10s
       retries: 3
@@ -48,7 +48,7 @@ services:
         soft: 262144
         hard: 262144
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:8123/ping']
       interval: 10s
       timeout: 5s
       retries: 5

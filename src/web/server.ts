@@ -22,6 +22,7 @@ import indexHtml from './index.html';
 
 Bun.serve({
 	port: PORT,
+	idleTimeout: 255, // 5 minutos (default era 10s)
 	routes: {
 		// Serve the main dashboard
 		'/': indexHtml,
@@ -850,24 +851,92 @@ Bun.serve({
 
 		'/api/provision/full-setup-stream': {
 			POST: async (req) => {
-				const { sshHost } = await req.json();
+				const startTime = Date.now();
+				console.log(`[${new Date().toISOString()}] 🚀 Full setup stream started`);
+
+				let body;
+				try {
+					body = await req.json();
+				} catch (err) {
+					console.log(`[${new Date().toISOString()}] ❌ Failed to parse request body:`, err);
+					return Response.json({ error: 'Invalid JSON body' }, { status: 400 });
+				}
+
+				const { sshHost } = body;
 				if (!sshHost) {
+					console.log(`[${new Date().toISOString()}] ❌ Missing sshHost`);
 					return Response.json({ error: 'sshHost is required' }, { status: 400 });
 				}
 
+				console.log(`[${new Date().toISOString()}] 📡 SSH Host: ${sshHost}`);
 				const masterTailscaleIp = '100.77.201.55';
 
 				const stream = new ReadableStream({
 					async start(controller) {
+						let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+						let isClosed = false;
+
 						const send = (data: object) => {
-							controller.enqueue(`data: ${JSON.stringify(data)}\n\n`);
+							if (isClosed) {
+								console.log(`[${new Date().toISOString()}] ⚠️ Tried to send after close:`, data);
+								return;
+							}
+							try {
+								const msg = `data: ${JSON.stringify(data)}\n\n`;
+								controller.enqueue(msg);
+								console.log(`[${new Date().toISOString()}] 📤 SSE:`, JSON.stringify(data).slice(0, 200));
+							} catch (err) {
+								console.log(`[${new Date().toISOString()}] ❌ Failed to send SSE:`, err);
+								isClosed = true;
+							}
 						};
 
-						const runStep = async (name: string, command: string) => {
+						const cleanup = () => {
+							if (heartbeatInterval) {
+								clearInterval(heartbeatInterval);
+								heartbeatInterval = null;
+							}
+							if (!isClosed) {
+								isClosed = true;
+								try {
+									controller.close();
+								} catch {}
+							}
+							const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+							console.log(`[${new Date().toISOString()}] ✅ Stream closed after ${elapsed}s`);
+						};
+
+						// Heartbeat every 5 seconds to keep connection alive
+						heartbeatInterval = setInterval(() => {
+							if (!isClosed) {
+								try {
+									controller.enqueue(`: heartbeat\n\n`);
+								} catch {
+									cleanup();
+								}
+							}
+						}, 5000);
+
+						const runStep = async (name: string, command: string, timeoutMs = 120000) => {
+							console.log(`[${new Date().toISOString()}] ▶️ Step: ${name}`);
+							console.log(`[${new Date().toISOString()}]    Command: ${command.slice(0, 100)}...`);
 							send({ type: 'step', step: name, status: 'running' });
+
 							try {
-								const result = await SSH.ssh(sshHost, command);
+								// Run SSH with timeout
+								const sshPromise = SSH.ssh(sshHost, command);
+								const timeoutPromise = new Promise<never>((_, reject) =>
+									setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms`)), timeoutMs)
+								);
+
+								const result = await Promise.race([sshPromise, timeoutPromise]);
 								const success = result.exitCode === 0;
+
+								console.log(`[${new Date().toISOString()}] ${success ? '✓' : '✗'} Step: ${name} (exit: ${result.exitCode})`);
+								if (result.stderr) {
+									console.log(`[${new Date().toISOString()}]    stderr: ${result.stderr.slice(0, 200)}`);
+								}
+
 								send({
 									type: 'step',
 									step: name,
@@ -876,105 +945,139 @@ Bun.serve({
 								});
 								return { success, stdout: result.stdout, stderr: result.stderr };
 							} catch (err) {
+								console.log(`[${new Date().toISOString()}] ❌ Step failed: ${name}`, err);
 								send({ type: 'step', step: name, status: 'error', output: String(err) });
 								return { success: false, stdout: '', stderr: String(err) };
 							}
 						};
 
-						// Run setup steps
-						const sshTest = await runStep('Test SSH connection', 'echo "OK"');
-						if (!sshTest.success) {
-							send({ type: 'done', success: false, error: 'SSH connection failed' });
-							controller.close();
-							return;
-						}
-
-						// Docker
-						const dockerCheck = await SSH.ssh(sshHost, 'docker --version');
-						if (dockerCheck.exitCode !== 0) {
-							await runStep('Install Docker', 'curl -fsSL https://get.docker.com | sh');
-							await runStep('Start Docker', 'systemctl enable docker && systemctl start docker');
-						} else {
-							send({ type: 'step', step: 'Docker already installed', status: 'skipped', output: dockerCheck.stdout });
-						}
-
-						// Tailscale
-						const tsCheck = await SSH.ssh(sshHost, 'tailscale ip -4 2>/dev/null');
-						let tailscaleIp = '';
-						let needsAuth = false;
-
-						if (tsCheck.exitCode !== 0) {
-							await runStep('Install Tailscale', 'curl -fsSL https://tailscale.com/install.sh | sh');
-							const tsUp = await SSH.ssh(sshHost, 'tailscale up --timeout=5s 2>&1 || true');
-							if (tsUp.stdout.includes('https://')) {
-								needsAuth = true;
-								const urlMatch = tsUp.stdout.match(/(https:\/\/login\.tailscale\.com\/[^\s]+)/);
-								send({ type: 'auth', url: urlMatch ? urlMatch[1] : 'Check tailscale up' });
+						try {
+							// Run setup steps
+							const sshTest = await runStep('Test SSH connection', 'echo "OK"', 15000);
+							if (!sshTest.success) {
+								send({ type: 'done', success: false, error: 'SSH connection failed' });
+								cleanup();
+								return;
 							}
-						} else {
-							tailscaleIp = tsCheck.stdout.trim();
-							send({ type: 'step', step: 'Tailscale configured', status: 'skipped', output: tailscaleIp });
+
+							// Docker
+							console.log(`[${new Date().toISOString()}] 🐳 Checking Docker...`);
+							const dockerCheck = await SSH.ssh(sshHost, 'docker --version');
+							if (dockerCheck.exitCode !== 0) {
+								await runStep('Install Docker', 'curl -fsSL https://get.docker.com | sh', 180000);
+								await runStep('Start Docker', 'systemctl enable docker && systemctl start docker');
+							} else {
+								console.log(`[${new Date().toISOString()}] ✓ Docker already installed: ${dockerCheck.stdout}`);
+								send({ type: 'step', step: 'Docker already installed', status: 'skipped', output: dockerCheck.stdout });
+							}
+
+							// Tailscale
+							console.log(`[${new Date().toISOString()}] 🔗 Checking Tailscale...`);
+							const tsCheck = await SSH.ssh(sshHost, 'tailscale ip -4 2>/dev/null');
+							let tailscaleIp = '';
+							let needsAuth = false;
+
+							if (tsCheck.exitCode !== 0) {
+								console.log(`[${new Date().toISOString()}] 📥 Installing Tailscale...`);
+								await runStep('Install Tailscale', 'curl -fsSL https://tailscale.com/install.sh | sh', 120000);
+
+								console.log(`[${new Date().toISOString()}] 🔐 Running tailscale up...`);
+								send({ type: 'step', step: 'Configure Tailscale', status: 'running' });
+								const tsUp = await SSH.ssh(sshHost, 'tailscale up --timeout=10s 2>&1 || true');
+								console.log(`[${new Date().toISOString()}]    tailscale up output: ${tsUp.stdout.slice(0, 300)}`);
+
+								if (tsUp.stdout.includes('https://')) {
+									needsAuth = true;
+									const urlMatch = tsUp.stdout.match(/(https:\/\/login\.tailscale\.com\/[^\s]+)/);
+									const authUrl = urlMatch ? urlMatch[1] : 'Check tailscale up';
+									console.log(`[${new Date().toISOString()}] 🔗 Tailscale auth URL: ${authUrl}`);
+									send({ type: 'step', step: 'Configure Tailscale', status: 'auth_needed', output: authUrl });
+									send({ type: 'auth', url: authUrl });
+								} else {
+									// Check if we got an IP
+									const ipCheck = await SSH.ssh(sshHost, 'tailscale ip -4 2>/dev/null');
+									if (ipCheck.exitCode === 0) {
+										tailscaleIp = ipCheck.stdout.trim();
+										console.log(`[${new Date().toISOString()}] ✓ Tailscale IP: ${tailscaleIp}`);
+										send({ type: 'step', step: 'Configure Tailscale', status: 'done', output: tailscaleIp });
+									} else {
+										send({ type: 'step', step: 'Configure Tailscale', status: 'error', output: tsUp.stdout });
+									}
+								}
+							} else {
+								tailscaleIp = tsCheck.stdout.trim();
+								console.log(`[${new Date().toISOString()}] ✓ Tailscale already configured: ${tailscaleIp}`);
+								send({ type: 'step', step: 'Tailscale configured', status: 'skipped', output: tailscaleIp });
+							}
+
+							// iptables-persistent
+							await runStep('Install iptables-persistent', 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent', 60000);
+
+							// Get interface
+							const ifaceResult = await SSH.ssh(sshHost, "ip route | grep default | awk '{print $5}' | head -1");
+							const iface = ifaceResult.stdout.trim() || 'eth0';
+							console.log(`[${new Date().toISOString()}] 🌐 Interface: ${iface}`);
+							send({ type: 'step', step: 'Detect interface', status: 'done', output: iface });
+
+							// Docker daemon
+							const daemonJson = JSON.stringify({ 'userland-proxy': false, 'log-driver': 'json-file', 'log-opts': { 'max-size': '10m', 'max-file': '3' } }, null, 2);
+							await runStep('Configure Docker daemon', `echo '${daemonJson.replace(/'/g, "'\\''")}' > /etc/docker/daemon.json`);
+
+							// iptables
+							const ipt = [
+								'iptables -F DOCKER-USER 2>/dev/null || true',
+								'iptables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT',
+								'iptables -A DOCKER-USER -i lo -j ACCEPT',
+								'iptables -A DOCKER-USER -s 100.64.0.0/10 -j ACCEPT',
+								'iptables -A DOCKER-USER -i br-+ -j ACCEPT',
+								'iptables -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 80 -j ACCEPT',
+								'iptables -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 443 -j ACCEPT',
+								'iptables -A DOCKER-USER -p udp -m conntrack --ctorigdstport 443 -j ACCEPT',
+								`iptables -A DOCKER-USER -i ${iface} -j DROP`,
+								'iptables -A DOCKER-USER -j RETURN',
+							];
+							await runStep('Configure iptables', ipt.join(' && '));
+
+							const ip6t = [
+								'ip6tables -F DOCKER-USER 2>/dev/null || true',
+								'ip6tables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT',
+								'ip6tables -A DOCKER-USER -i lo -j ACCEPT',
+								'ip6tables -A DOCKER-USER -s fd7a:115c:a1e0::/48 -j ACCEPT',
+								'ip6tables -A DOCKER-USER -i br-+ -j ACCEPT',
+								'ip6tables -A DOCKER-USER -p tcp --dport 80 -j ACCEPT',
+								'ip6tables -A DOCKER-USER -p tcp --dport 443 -j ACCEPT',
+								'ip6tables -A DOCKER-USER -p udp --dport 443 -j ACCEPT',
+								`ip6tables -A DOCKER-USER -i ${iface} -j DROP`,
+								'ip6tables -A DOCKER-USER -j RETURN',
+							];
+							await runStep('Configure ip6tables', ip6t.join(' && '));
+
+							await runStep('Save iptables', 'netfilter-persistent save');
+							await runStep('Create restore script', `echo '#!/bin/bash\niptables -F DOCKER-USER\niptables -A DOCKER-USER -j RETURN\nip6tables -F DOCKER-USER\nip6tables -A DOCKER-USER -j RETURN' > /root/restore-iptables.sh && chmod +x /root/restore-iptables.sh`);
+							await runStep('Restart Docker', 'systemctl restart docker');
+
+							// Get final Tailscale IP
+							if (!tailscaleIp && !needsAuth) {
+								const final = await SSH.ssh(sshHost, 'tailscale ip -4 2>/dev/null');
+								if (final.exitCode === 0) tailscaleIp = final.stdout.trim();
+							}
+
+							const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+							console.log(`[${new Date().toISOString()}] 🎉 Setup complete in ${elapsed}s`);
+
+							send({
+								type: 'done',
+								success: true,
+								tailscaleIp,
+								masterTailscaleIp,
+								needsAuth,
+							});
+						} catch (err) {
+							console.log(`[${new Date().toISOString()}] ❌ Setup failed with exception:`, err);
+							send({ type: 'done', success: false, error: String(err) });
+						} finally {
+							cleanup();
 						}
-
-						// iptables-persistent
-						await runStep('Install iptables-persistent', 'DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent');
-
-						// Get interface
-						const ifaceResult = await SSH.ssh(sshHost, "ip route | grep default | awk '{print $5}' | head -1");
-						const iface = ifaceResult.stdout.trim() || 'eth0';
-						send({ type: 'step', step: 'Detect interface', status: 'done', output: iface });
-
-						// Docker daemon
-						const daemonJson = JSON.stringify({ 'userland-proxy': false, 'log-driver': 'json-file', 'log-opts': { 'max-size': '10m', 'max-file': '3' } }, null, 2);
-						await runStep('Configure Docker daemon', `echo '${daemonJson.replace(/'/g, "'\\''")}' > /etc/docker/daemon.json`);
-
-						// iptables
-						const ipt = [
-							'iptables -F DOCKER-USER 2>/dev/null || true',
-							'iptables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT',
-							'iptables -A DOCKER-USER -i lo -j ACCEPT',
-							'iptables -A DOCKER-USER -s 100.64.0.0/10 -j ACCEPT',
-							'iptables -A DOCKER-USER -i br-+ -j ACCEPT',
-							'iptables -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 80 -j ACCEPT',
-							'iptables -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 443 -j ACCEPT',
-							'iptables -A DOCKER-USER -p udp -m conntrack --ctorigdstport 443 -j ACCEPT',
-							`iptables -A DOCKER-USER -i ${iface} -j DROP`,
-							'iptables -A DOCKER-USER -j RETURN',
-						];
-						await runStep('Configure iptables', ipt.join(' && '));
-
-						const ip6t = [
-							'ip6tables -F DOCKER-USER 2>/dev/null || true',
-							'ip6tables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT',
-							'ip6tables -A DOCKER-USER -i lo -j ACCEPT',
-							'ip6tables -A DOCKER-USER -s fd7a:115c:a1e0::/48 -j ACCEPT',
-							'ip6tables -A DOCKER-USER -i br-+ -j ACCEPT',
-							'ip6tables -A DOCKER-USER -p tcp --dport 80 -j ACCEPT',
-							'ip6tables -A DOCKER-USER -p tcp --dport 443 -j ACCEPT',
-							'ip6tables -A DOCKER-USER -p udp --dport 443 -j ACCEPT',
-							`ip6tables -A DOCKER-USER -i ${iface} -j DROP`,
-							'ip6tables -A DOCKER-USER -j RETURN',
-						];
-						await runStep('Configure ip6tables', ip6t.join(' && '));
-
-						await runStep('Save iptables', 'netfilter-persistent save');
-						await runStep('Create restore script', `echo '#!/bin/bash\niptables -F DOCKER-USER\niptables -A DOCKER-USER -j RETURN\nip6tables -F DOCKER-USER\nip6tables -A DOCKER-USER -j RETURN' > /root/restore-iptables.sh && chmod +x /root/restore-iptables.sh`);
-						await runStep('Restart Docker', 'systemctl restart docker');
-
-						// Get final Tailscale IP
-						if (!tailscaleIp && !needsAuth) {
-							const final = await SSH.ssh(sshHost, 'tailscale ip -4 2>/dev/null');
-							if (final.exitCode === 0) tailscaleIp = final.stdout.trim();
-						}
-
-						send({
-							type: 'done',
-							success: true,
-							tailscaleIp,
-							masterTailscaleIp,
-							needsAuth,
-						});
-						controller.close();
 					},
 				});
 
