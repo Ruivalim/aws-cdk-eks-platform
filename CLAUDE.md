@@ -19,7 +19,13 @@ src/
 ├── cli.ts              # CLI interativa principal
 ├── lib/
 │   ├── digitalocean.ts # Cliente API Digital Ocean (droplets, SSH keys, billing)
+│   ├── cloudflare.ts   # Cliente API Cloudflare (DNS, Tunnels)
 │   ├── ssh.ts          # Utilitários SSH (executar comandos, info do servidor, containers)
+│   ├── github.ts       # Utilitários Git (clone, pull, deploy keys)
+│   ├── db.ts           # SQLite local (projects, deployments, servers)
+│   ├── build.ts        # Orquestração de builds no build server
+│   ├── deploy.ts       # Deploy blue-green com health checks
+│   ├── registry.ts     # Gerenciamento do Docker Registry
 │   ├── services.ts     # Catálogo de serviços (Outline, n8n, Glitchtip, etc.)
 │   └── log.ts          # Funções de logging colorido com chalk
 └── web/
@@ -28,10 +34,17 @@ src/
     ├── index.html      # Entry point HTML
     └── styles.css      # Estilos do dashboard
 
-# Scripts standalone (rodam via CLI ou diretamente)
+scripts/
+├── setup-build-server.ts   # Configura build server (Docker, Registry, Git)
+├── setup-target-server.ts  # Configura servidor de apps (Docker, cloudflared)
+
+# Scripts legados (ainda funcionam)
 setup-coolify-master.ts    # Configura servidor master com Docker, Tailscale, iptables
 setup-coolify-adjacent.ts  # Configura servidor child para cluster
 setup-databases.ts         # Cria databases/users no Postgres central
+
+data/
+└── deployments.db      # SQLite local com projetos, deploys, servidores
 
 # Docker Composes por serviço
 outline/
@@ -41,14 +54,67 @@ soketi/
 n8n/
 plausible/
 umami/
-calcom/
 typebot/
-minio/
 uptime-kuma/
 backrest/
 cloudbeaver/
 redis-insight/
 nitropage/
+```
+
+## Deploy Pipeline
+
+### Arquitetura
+
+```
+Seu Mac (Controller)
+    │
+    ├── CLI/Dashboard (localhost:3456)
+    ├── SQLite local (data/deployments.db)
+    │
+    └── Controla via SSH/Tailscale:
+        │
+        ├── Build Server (Droplet)
+        │   ├── Docker
+        │   ├── Registry (:5000)
+        │   └── Git + Deploy Keys
+        │
+        └── Target Server(s) (Droplet)
+            ├── Docker
+            ├── cloudflared (Tunnel)
+            └── Apps (blue/green containers)
+```
+
+### Fluxo de Deploy
+
+1. **Build** (no build server):
+   - Clone/pull do repositório
+   - Executa `build.sh` se configurado
+   - `docker build` → imagem com tag do commit
+   - `docker push` para registry local
+
+2. **Deploy** (no target server):
+   - `docker pull` da imagem
+   - Identifica slot inativo (blue/green)
+   - Inicia novo container no slot inativo
+   - Health check (30s timeout)
+   - Se OK: atualiza Cloudflare Tunnel, para container antigo
+   - Se falha: remove container novo, mantém antigo
+
+### Comandos
+
+```bash
+# Setup inicial
+bun scripts/setup-build-server.ts    # Configura build server
+bun scripts/setup-target-server.ts   # Configura target server
+
+# CLI principal
+bun src/cli.ts
+
+# No menu:
+# - Projects & Deploy → Add Project
+# - Projects & Deploy → Deploy / Update
+# - Projects & Deploy → Rollback
 ```
 
 ## src/lib/
@@ -61,11 +127,51 @@ Cliente para API Digital Ocean. Funções para:
 - Presets de regions, sizes e images
 - **DNS**: listar/criar/deletar domínios e records (A, AAAA, CNAME, MX, TXT, NS, SRV, CAA)
 
+### `cloudflare.ts`
+Cliente para API Cloudflare. Funções para:
+- Listar zones (domínios)
+- CRUD de DNS records
+- Gerenciar Cloudflare Tunnels (criar, deletar, listar)
+- Configurar rotas de tunnel (hostname → service)
+
 ### `ssh.ts`
 Utilitários para executar comandos via SSH:
 - `ssh(host, command)` - executa comando e retorna stdout/stderr/exitCode
 - `getServerInfo(host)` - retorna info do servidor (OS, memory, disk, Docker, Tailscale)
 - `getDockerContainers(host)` - lista containers rodando
+
+### `github.ts`
+Utilitários para Git via SSH:
+- `cloneRepo(host, url, dir, branch)` - clona repositório
+- `pullRepo(host, dir, branch)` - atualiza repositório
+- `generateDeployKey(host)` - gera SSH key para GitHub
+- `parseGitHubUrl(url)` - extrai owner/repo de URLs
+
+### `db.ts`
+SQLite local para persistência (usa `bun:sqlite`):
+- **Projects**: nome, repo, branch, target server, domain, env vars
+- **Deployments**: histórico de deploys, estado, logs
+- **Servers**: servidores registrados (build, worker)
+
+### `build.ts`
+Orquestração de builds no build server:
+- `runBuild(config)` - clone, build.sh, docker build, push
+- `checkBuildServer()` - verifica se build server está pronto
+- `getBuildServerStats()` - disk usage, images count
+
+### `deploy.ts`
+Deploy blue-green com zero downtime:
+- `fullDeploy(project)` - build + deploy completo
+- `runDeploy(config)` - apenas deploy (imagem já existe)
+- `rollback(project, deployment)` - voltar para versão anterior
+- `waitForHealthy(host, port, path)` - health check
+
+### `registry.ts`
+Gerenciamento do Docker Registry privado:
+- `listImages(host)` - listar imagens no registry
+- `pushImage(host, url)` - push para registry
+- `pullImage(host, url)` - pull do registry
+- `cleanupOldImages(host, keep)` - limpeza
 
 ### `services.ts`
 Catálogo de serviços disponíveis com metadata:

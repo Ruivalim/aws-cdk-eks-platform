@@ -15,7 +15,12 @@ import { select, input, confirm, checkbox } from '@inquirer/prompts';
 import chalk from 'chalk';
 import log from './lib/log';
 import * as DO from './lib/digitalocean';
+import * as CF from './lib/cloudflare';
 import * as SSH from './lib/ssh';
+import * as GitHub from './lib/github';
+import * as DB from './lib/db';
+import * as Build from './lib/build';
+import * as Deploy from './lib/deploy';
 import { SERVICES, generateSecret, generatePassword } from './lib/services';
 
 // ============ Main Menu ============
@@ -32,7 +37,9 @@ async function mainMenu(): Promise<void> {
 		message: 'What would you like to do?',
 		choices: [
 			{ name: '☁️  Digital Ocean', value: 'digitalocean', description: 'Manage droplets, SSH keys, billing' },
+			{ name: '🌐  Cloudflare', value: 'cloudflare', description: 'DNS and Tunnels' },
 			{ name: '🖥️  Servers', value: 'servers', description: 'Setup and manage servers' },
+			{ name: '🚀  Projects & Deploy', value: 'projects', description: 'Manage apps and deployments' },
 			{ name: '🗄️  Databases', value: 'databases', description: 'Provision databases for services' },
 			{ name: '📦  Services', value: 'services', description: 'View and manage services' },
 			{ name: '🌐  Web Dashboard', value: 'web', description: 'Open web interface' },
@@ -44,8 +51,14 @@ async function mainMenu(): Promise<void> {
 		case 'digitalocean':
 			await digitalOceanMenu();
 			break;
+		case 'cloudflare':
+			await cloudflareMenu();
+			break;
 		case 'servers':
 			await serversMenu();
+			break;
+		case 'projects':
+			await projectsMenu();
 			break;
 		case 'databases':
 			await databasesMenu();
@@ -942,17 +955,38 @@ async function serversMenu(): Promise<void> {
 	const choice = await select({
 		message: 'Server Options:',
 		choices: [
+			{ name: '📋  List Registered Servers', value: 'list', description: 'View servers in database' },
 			{ name: '📊  Server Status', value: 'status', description: 'Check server status and info' },
-			{ name: '🆕  Setup Master Server', value: 'master', description: 'Configure new Coolify master' },
-			{ name: '➕  Setup Adjacent Server', value: 'adjacent', description: 'Add server to cluster' },
+			{ name: '➕  Register Existing Server', value: 'register', description: 'Add existing server to database' },
+			{ name: '🌐  Setup Gateway Server', value: 'gateway', description: 'Configure Caddy reverse proxy' },
+			{ name: '🔨  Setup Build Server', value: 'build', description: 'Configure build server with Docker + Registry' },
+			{ name: '🎯  Setup Target Server', value: 'target', description: 'Configure app server with Docker' },
 			{ name: '🐳  Docker Containers', value: 'containers', description: 'View running containers' },
+			{ name: chalk.dim('───  Legacy  ───'), value: '', disabled: true },
+			{ name: '🆕  Setup Master Server (Coolify)', value: 'master' },
+			{ name: '➕  Setup Adjacent Server (Coolify)', value: 'adjacent' },
 			{ name: '←   Back', value: 'back' },
 		],
 	});
 
 	switch (choice) {
+		case 'list':
+			await listRegisteredServers();
+			break;
 		case 'status':
 			await showServerStatus();
+			break;
+		case 'register':
+			await registerExistingServer();
+			break;
+		case 'gateway':
+			await setupGatewayServer();
+			break;
+		case 'build':
+			await setupBuildServer();
+			break;
+		case 'target':
+			await setupTargetServer();
 			break;
 		case 'master':
 			await runSetupMaster();
@@ -968,6 +1002,800 @@ async function serversMenu(): Promise<void> {
 	}
 
 	await serversMenu();
+}
+
+async function registerExistingServer(): Promise<void> {
+	log.header('Register Existing Server');
+
+	const sshHost = await input({
+		message: 'SSH host (e.g., root@143.198.140.78 or hostname from ~/.ssh/config):',
+		validate: (v) => v.length > 0 || 'Required',
+	});
+
+	log.step('Connecting to server...');
+	if (!(await SSH.testConnection(sshHost))) {
+		log.error('Cannot connect to server');
+		await input({ message: 'Press Enter to go back...' });
+		return;
+	}
+	log.success('Connected');
+
+	// Get server info
+	log.step('Getting server info...');
+	const serverInfo = await SSH.getServerInfo(sshHost);
+
+	// Get Tailscale IP
+	const tsResult = await SSH.ssh(sshHost, 'tailscale ip -4 2>/dev/null');
+	const tailscaleIp = tsResult.stdout.trim();
+
+	if (!tailscaleIp) {
+		log.error('Tailscale not configured on this server');
+		log.info('Run "Setup Gateway/Build/Target Server" to configure Tailscale');
+		await input({ message: 'Press Enter to go back...' });
+		return;
+	}
+
+	// Get public IP
+	const ipResult = await SSH.ssh(sshHost, 'curl -s ifconfig.me');
+	const publicIp = ipResult.stdout.trim();
+
+	console.log();
+	console.log(chalk.bold('Server Info:'));
+	console.log(`  Hostname:     ${serverInfo.hostname}`);
+	console.log(`  Tailscale IP: ${tailscaleIp}`);
+	console.log(`  Public IP:    ${publicIp}`);
+	console.log(`  Docker:       ${serverInfo.docker ? chalk.green('Yes') : chalk.red('No')}`);
+	console.log();
+
+	// Check if already registered
+	const existing = DB.getServerByTailscaleIp(tailscaleIp);
+	if (existing) {
+		log.warn(`Server already registered as "${existing.name}" [${existing.role}]`);
+		const update = await confirm({
+			message: 'Update existing registration?',
+			default: true,
+		});
+		if (!update) return;
+	}
+
+	// Ask for role
+	const role = await select({
+		message: 'Server role:',
+		choices: [
+			{ name: 'Gateway (Caddy reverse proxy)', value: 'gateway' as const },
+			{ name: 'Build (Docker Registry)', value: 'build' as const },
+			{ name: 'Worker (App deployment)', value: 'worker' as const },
+		],
+	});
+
+	const name = await input({
+		message: 'Server name:',
+		default: serverInfo.hostname || `${role}-server`,
+	});
+
+	// Register or update
+	if (existing) {
+		DB.updateServer(existing.id, { name, role, public_ip: publicIp });
+		log.success(`Server updated: ${name} [${role}]`);
+	} else {
+		const server = DB.createServer({
+			name,
+			tailscale_ip: tailscaleIp,
+			public_ip: publicIp,
+			role,
+		});
+		log.success(`Server registered: ${server.name} [${role}]`);
+	}
+
+	// Show env hint
+	console.log();
+	if (role === 'gateway') {
+		console.log(chalk.bold('Add to .env:'));
+		console.log(chalk.cyan(`GATEWAY_SERVER_HOST=${tailscaleIp}`));
+	} else if (role === 'build') {
+		console.log(chalk.bold('Add to .env:'));
+		console.log(chalk.cyan(`BUILD_SERVER_HOST=${tailscaleIp}`));
+		console.log(chalk.cyan(`REGISTRY_URL=${tailscaleIp}:5000`));
+	}
+
+	await input({ message: '\nPress Enter to continue...' });
+}
+
+async function listRegisteredServers(): Promise<void> {
+	const servers = DB.listServers();
+
+	if (servers.length === 0) {
+		log.warn('No servers registered yet');
+		log.info('Use "Setup Gateway Server", "Setup Build Server" or "Setup Target Server" to add servers');
+	} else {
+		console.log('\n' + chalk.bold('Registered Servers:'));
+		console.log(chalk.dim('─'.repeat(70)));
+
+		for (const s of servers) {
+			const roleColor =
+				s.role === 'gateway'
+					? chalk.cyan
+					: s.role === 'build'
+						? chalk.yellow
+						: s.role === 'master'
+							? chalk.blue
+							: chalk.green;
+			const statusIcon = s.status === 'active' ? chalk.green('●') : chalk.red('●');
+
+			console.log(`  ${statusIcon} ${chalk.bold(s.name)} ${roleColor(`[${s.role}]`)}`);
+			console.log(`    ${chalk.dim('Tailscale:')} ${s.tailscale_ip}`);
+			if (s.public_ip) console.log(`    ${chalk.dim('Public IP:')} ${s.public_ip}`);
+			if (s.tunnel_id) console.log(`    ${chalk.dim('Tunnel:')} ${s.tunnel_id}`);
+			console.log();
+		}
+	}
+
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function setupGatewayServer(): Promise<void> {
+	log.header('Setup Gateway Server (Caddy)');
+
+	// Setup logging
+	const logFile = `logs/gateway-setup-${Date.now()}.log`;
+	const logLines: string[] = [];
+	const logToFile = (msg: string) => {
+		const line = `[${new Date().toISOString()}] ${msg}`;
+		logLines.push(line);
+		console.log(chalk.dim(`  [LOG] ${msg}`));
+	};
+	const saveLog = async () => {
+		await Bun.write(logFile, logLines.join('\n'));
+		console.log(chalk.dim(`\n  Logs saved to: ${logFile}`));
+	};
+
+	logToFile('Starting gateway server setup');
+
+	const method = await select({
+		message: 'How do you want to setup the gateway server?',
+		choices: [
+			{ name: 'Create new droplet on Digital Ocean', value: 'create' },
+			{ name: 'Use existing server (SSH host)', value: 'existing' },
+		],
+	});
+
+	logToFile(`Method selected: ${method}`);
+
+	let sshHost = '';
+	let publicIP = '';
+
+	if (method === 'create') {
+		// Create droplet
+		const name = await input({ message: 'Droplet name:', default: 'gateway-server' });
+		const region = await select({
+			message: 'Region:',
+			choices: DO.RECOMMENDED_REGIONS.map((r) => ({ name: r.name, value: r.slug })),
+		});
+		const size = await select({
+			message: 'Size:',
+			choices: DO.RECOMMENDED_SIZES.map((s) => ({ name: `${s.name} - $${s.price}/mo`, value: s.slug })),
+		});
+		const sshKeys = await DO.listSSHKeys();
+		const selectedKey = await select({
+			message: 'SSH key:',
+			choices: sshKeys.map((k) => ({ name: k.name, value: k.id.toString() })),
+		});
+
+		log.step('Creating droplet...');
+		const droplet = await DO.createDroplet({
+			name,
+			region,
+			size,
+			image: 'ubuntu-24-04-x64',
+			ssh_keys: [selectedKey],
+			tags: ['gateway-server'],
+		});
+
+		log.success(`Droplet created: ${droplet.name}`);
+		log.step('Waiting for IP...');
+
+		for (let i = 0; i < 60; i++) {
+			await new Promise((r) => setTimeout(r, 2000));
+			const updated = await DO.getDroplet(droplet.id);
+			publicIP = DO.getPublicIP(updated) || '';
+			if (publicIP) break;
+			process.stdout.write('.');
+		}
+		console.log();
+
+		if (!publicIP) {
+			log.error('Failed to get IP');
+			return;
+		}
+
+		log.success(`IP: ${publicIP}`);
+		log.step('Waiting for SSH...');
+
+		sshHost = `root@${publicIP}`;
+		for (let i = 0; i < 30; i++) {
+			await new Promise((r) => setTimeout(r, 5000));
+			if (await SSH.testConnection(sshHost)) break;
+			process.stdout.write('.');
+		}
+		console.log();
+	} else {
+		sshHost = await input({
+			message: 'SSH host (e.g., root@1.2.3.4):',
+			validate: (v) => v.length > 0 || 'Required',
+		});
+	}
+
+	// Test connection
+	log.step('Testing SSH connection...');
+	logToFile(`Testing SSH connection to: ${sshHost}`);
+	if (!(await SSH.testConnection(sshHost))) {
+		log.error('Cannot connect');
+		logToFile('ERROR: SSH connection failed');
+		await saveLog();
+		await input({ message: 'Press Enter to go back...' });
+		return;
+	}
+	log.success('Connected');
+	logToFile('SSH connection successful');
+
+	// Get public IP if not set
+	if (!publicIP) {
+		const ipResult = await SSH.ssh(sshHost, 'curl -s ifconfig.me');
+		publicIP = ipResult.stdout.trim();
+		logToFile(`Public IP obtained: ${publicIP}`);
+	}
+
+	// Update system
+	log.step('Updating system...');
+	logToFile('Updating system packages...');
+	const updateResult = await SSH.ssh(sshHost, 'apt-get update -qq && apt-get upgrade -y -qq');
+	logToFile(`System update exit code: ${updateResult.exitCode}`);
+
+	// Docker
+	log.step('Installing Docker...');
+	const dockerCheck = await SSH.ssh(sshHost, 'docker --version');
+	logToFile(`Docker check exit code: ${dockerCheck.exitCode}, stdout: ${dockerCheck.stdout}`);
+	if (dockerCheck.exitCode !== 0) {
+		logToFile('Installing Docker...');
+		await SSH.ssh(sshHost, 'curl -fsSL https://get.docker.com | sh');
+		await SSH.ssh(sshHost, 'systemctl enable docker && systemctl start docker');
+	}
+	log.success('Docker ready');
+
+	// Tailscale
+	log.step('Setting up Tailscale...');
+	let tailscaleIp = '';
+	const tsCheck = await SSH.ssh(sshHost, 'tailscale ip -4 2>/dev/null');
+	logToFile(`Tailscale check exit code: ${tsCheck.exitCode}, stdout: "${tsCheck.stdout.trim()}"`);
+
+	if (tsCheck.exitCode !== 0) {
+		logToFile('Installing Tailscale...');
+		await SSH.ssh(sshHost, 'curl -fsSL https://tailscale.com/install.sh | sh');
+		const tsUp = await SSH.ssh(sshHost, 'tailscale up --timeout=10s 2>&1 || true');
+		logToFile(`Tailscale up stdout: ${tsUp.stdout}`);
+		if (tsUp.stdout.includes('https://')) {
+			const urlMatch = tsUp.stdout.match(/(https:\/\/login\.tailscale\.com\/[^\s]+)/);
+			if (urlMatch) {
+				log.warn('Tailscale needs auth!');
+				console.log(chalk.cyan(urlMatch[1]));
+				logToFile(`Tailscale auth URL: ${urlMatch[1]}`);
+				await input({ message: 'Press Enter after authenticating...' });
+			}
+		}
+		const ipResult = await SSH.ssh(sshHost, 'tailscale ip -4');
+		tailscaleIp = ipResult.stdout.trim();
+		logToFile(`Tailscale IP after auth: "${tailscaleIp}"`);
+	} else {
+		tailscaleIp = tsCheck.stdout.trim();
+		logToFile(`Tailscale already configured, IP: "${tailscaleIp}"`);
+	}
+	log.success(`Tailscale IP: ${tailscaleIp}`);
+
+	// Install Caddy
+	log.step('Installing Caddy...');
+	const caddyCheck = await SSH.ssh(sshHost, 'caddy version');
+	logToFile(`Caddy check exit code: ${caddyCheck.exitCode}`);
+	if (caddyCheck.exitCode !== 0) {
+		logToFile('Installing Caddy...');
+		const caddyInstall = await SSH.ssh(
+			sshHost,
+			`apt-get install -y debian-keyring debian-archive-keyring apt-transport-https && \
+			curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg && \
+			curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list && \
+			apt-get update && \
+			apt-get install -y caddy`
+		);
+		logToFile(`Caddy install exit code: ${caddyInstall.exitCode}`);
+	}
+	log.success('Caddy installed');
+
+	// Create initial Caddyfile
+	log.step('Configuring Caddy...');
+	const initialCaddyfile = `# Managed by coolify-infra
+{
+	email admin@example.com
+}
+
+:80 {
+	respond "Gateway ready. No routes configured." 200
+}`;
+
+	await SSH.ssh(sshHost, `mkdir -p /etc/caddy && echo '${initialCaddyfile}' > /etc/caddy/Caddyfile`);
+	await SSH.ssh(sshHost, 'systemctl enable caddy && systemctl restart caddy');
+	log.success('Caddy configured');
+	logToFile('Caddy configured');
+
+	// Configure iptables
+	log.step('Configuring firewall...');
+	await SSH.ssh(sshHost, 'DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent');
+
+	const rules = [
+		'iptables -F INPUT',
+		'iptables -P INPUT DROP',
+		'iptables -P FORWARD DROP',
+		'iptables -P OUTPUT ACCEPT',
+		'iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT',
+		'iptables -A INPUT -i lo -j ACCEPT',
+		'iptables -A INPUT -p tcp --dport 22 -j ACCEPT',
+		'iptables -A INPUT -p tcp --dport 80 -j ACCEPT',
+		'iptables -A INPUT -p tcp --dport 443 -j ACCEPT',
+		'iptables -A INPUT -i tailscale0 -j ACCEPT',
+		'iptables -A INPUT -p icmp -j ACCEPT',
+	];
+	await SSH.ssh(sshHost, rules.join(' && '));
+	await SSH.ssh(sshHost, 'netfilter-persistent save');
+	log.success('Firewall configured');
+	logToFile('Firewall configured');
+
+	// Register in DB
+	logToFile('=== DATABASE REGISTRATION ===');
+	const serverInfo = await SSH.getServerInfo(sshHost);
+	logToFile(`Server hostname: ${serverInfo.hostname}`);
+	logToFile(`Tailscale IP for DB: "${tailscaleIp}"`);
+	logToFile(`Public IP for DB: "${publicIP}"`);
+
+	if (!tailscaleIp) {
+		logToFile('ERROR: tailscaleIp is empty! Cannot register server.');
+		log.error('Tailscale IP is empty - server NOT registered!');
+	} else {
+		const existing = DB.getServerByTailscaleIp(tailscaleIp);
+		logToFile(`Existing server with this IP: ${existing ? existing.name : 'none'}`);
+
+		if (!existing) {
+			logToFile('Creating new server entry...');
+			try {
+				const newServer = DB.createServer({
+					name: serverInfo.hostname || 'gateway-server',
+					tailscale_ip: tailscaleIp,
+					public_ip: publicIP || null,
+					role: 'gateway',
+				});
+				logToFile(`Server created with ID: ${newServer.id}`);
+				log.success('Server registered as gateway');
+			} catch (err) {
+				logToFile(`ERROR creating server: ${err}`);
+				log.error(`Failed to register server: ${err}`);
+			}
+		} else {
+			logToFile('Updating existing server...');
+			DB.updateServer(existing.id, { role: 'gateway', public_ip: publicIP || null });
+			log.info('Server updated to gateway role');
+		}
+	}
+
+	// Verify registration
+	const allServers = DB.listServers();
+	logToFile(`Total servers in DB after registration: ${allServers.length}`);
+	allServers.forEach(s => logToFile(`  - ${s.name} [${s.role}] ${s.tailscale_ip}`));
+
+	// Save log
+	await saveLog();
+
+	// Summary
+	console.log(chalk.bold.green('\n✓ Gateway Server Ready!\n'));
+	console.log(`  Hostname: ${serverInfo.hostname}`);
+	console.log(`  Public IP: ${publicIP}`);
+	console.log(`  Tailscale IP: ${tailscaleIp}`);
+	console.log(`  Caddy: Running`);
+	console.log();
+	console.log(chalk.bold('Ports Open:'));
+	console.log('  - 22 (SSH)');
+	console.log('  - 80 (HTTP)');
+	console.log('  - 443 (HTTPS)');
+	console.log('  - Tailscale (internal)');
+	console.log();
+	console.log(chalk.bold('Add to .env:'));
+	console.log(chalk.cyan(`GATEWAY_SERVER_HOST=${tailscaleIp}`));
+	console.log();
+	console.log(chalk.bold('Next Steps:'));
+	console.log(`  1. Point your domain DNS A records to: ${publicIP}`);
+	console.log('  2. Add and deploy projects - Caddy will auto-configure HTTPS');
+
+	await input({ message: '\nPress Enter to continue...' });
+}
+
+async function setupBuildServer(): Promise<void> {
+	log.header('Setup Build Server');
+
+	const method = await select({
+		message: 'How do you want to setup the build server?',
+		choices: [
+			{ name: 'Create new droplet on Digital Ocean', value: 'create' },
+			{ name: 'Use existing server (SSH host)', value: 'existing' },
+		],
+	});
+
+	let sshHost = '';
+
+	if (method === 'create') {
+		// Create droplet
+		const name = await input({ message: 'Droplet name:', default: 'build-server' });
+		const region = await select({
+			message: 'Region:',
+			choices: DO.RECOMMENDED_REGIONS.map((r) => ({ name: r.name, value: r.slug })),
+		});
+		const size = await select({
+			message: 'Size:',
+			choices: DO.RECOMMENDED_SIZES.map((s) => ({ name: `${s.name} - $${s.price}/mo`, value: s.slug })),
+		});
+		const sshKeys = await DO.listSSHKeys();
+		const selectedKey = await select({
+			message: 'SSH key:',
+			choices: sshKeys.map((k) => ({ name: k.name, value: k.id.toString() })),
+		});
+
+		log.step('Creating droplet...');
+		const droplet = await DO.createDroplet({
+			name,
+			region,
+			size,
+			image: 'ubuntu-24-04-x64',
+			ssh_keys: [selectedKey],
+			tags: ['build-server'],
+		});
+
+		log.success(`Droplet created: ${droplet.name}`);
+		log.step('Waiting for IP...');
+
+		let publicIP = '';
+		for (let i = 0; i < 60; i++) {
+			await new Promise((r) => setTimeout(r, 2000));
+			const updated = await DO.getDroplet(droplet.id);
+			publicIP = DO.getPublicIP(updated) || '';
+			if (publicIP) break;
+			process.stdout.write('.');
+		}
+		console.log();
+
+		if (!publicIP) {
+			log.error('Failed to get IP');
+			return;
+		}
+
+		log.success(`IP: ${publicIP}`);
+		log.step('Waiting for SSH...');
+
+		sshHost = `root@${publicIP}`;
+		for (let i = 0; i < 30; i++) {
+			await new Promise((r) => setTimeout(r, 5000));
+			if (await SSH.testConnection(sshHost)) break;
+			process.stdout.write('.');
+		}
+		console.log();
+	} else {
+		sshHost = await input({
+			message: 'SSH host (e.g., root@1.2.3.4):',
+			validate: (v) => v.length > 0 || 'Required',
+		});
+	}
+
+	// Test connection
+	log.step('Testing SSH connection...');
+	if (!(await SSH.testConnection(sshHost))) {
+		log.error('Cannot connect');
+		await input({ message: 'Press Enter to go back...' });
+		return;
+	}
+	log.success('Connected');
+
+	// Update system
+	log.step('Updating system...');
+	await SSH.ssh(sshHost, 'apt-get update -qq && apt-get upgrade -y -qq');
+
+	// Docker
+	log.step('Installing Docker...');
+	const dockerCheck = await SSH.ssh(sshHost, 'docker --version');
+	if (dockerCheck.exitCode !== 0) {
+		await SSH.ssh(sshHost, 'curl -fsSL https://get.docker.com | sh');
+		await SSH.ssh(sshHost, 'systemctl enable docker && systemctl start docker');
+	}
+	log.success('Docker ready');
+
+	// Git
+	log.step('Installing Git...');
+	await SSH.ssh(sshHost, 'apt-get install -y -qq git');
+
+	// Build workspace
+	log.step('Creating build workspace...');
+	await SSH.ssh(sshHost, 'mkdir -p /opt/builds');
+
+	// Registry
+	log.step('Setting up Docker Registry...');
+	const registryCheck = await SSH.ssh(sshHost, 'docker ps --format "{{.Names}}" | grep -q registry');
+	if (registryCheck.exitCode !== 0) {
+		await SSH.ssh(
+			sshHost,
+			'docker run -d --name registry --restart always -p 5000:5000 -v /opt/registry:/var/lib/registry registry:2'
+		);
+	}
+	log.success('Registry running on port 5000');
+
+	// GitHub deploy key
+	log.step('Generating GitHub deploy key...');
+	const keyResult = await GitHub.generateDeployKey(sshHost);
+	log.success('Deploy key generated');
+
+	// Tailscale
+	log.step('Setting up Tailscale...');
+	let tailscaleIp = '';
+	const tsCheck = await SSH.ssh(sshHost, 'tailscale ip -4 2>/dev/null');
+	if (tsCheck.exitCode !== 0) {
+		await SSH.ssh(sshHost, 'curl -fsSL https://tailscale.com/install.sh | sh');
+		const tsUp = await SSH.ssh(sshHost, 'tailscale up --timeout=10s 2>&1 || true');
+		if (tsUp.stdout.includes('https://')) {
+			const urlMatch = tsUp.stdout.match(/(https:\/\/login\.tailscale\.com\/[^\s]+)/);
+			if (urlMatch) {
+				log.warn('Tailscale needs auth!');
+				console.log(chalk.cyan(urlMatch[1]));
+				await input({ message: 'Press Enter after authenticating...' });
+			}
+		}
+		const ipResult = await SSH.ssh(sshHost, 'tailscale ip -4');
+		tailscaleIp = ipResult.stdout.trim();
+	} else {
+		tailscaleIp = tsCheck.stdout.trim();
+	}
+	log.success(`Tailscale IP: ${tailscaleIp}`);
+
+	// Register in DB
+	const serverInfo = await SSH.getServerInfo(sshHost);
+	const existing = DB.getServerByTailscaleIp(tailscaleIp);
+	if (!existing && tailscaleIp) {
+		DB.createServer({
+			name: serverInfo.hostname || 'build-server',
+			tailscale_ip: tailscaleIp,
+			public_ip: sshHost.includes('@') ? sshHost.split('@')[1] : null,
+			role: 'build',
+		});
+	}
+
+	// Summary
+	console.log(chalk.bold.green('\n✓ Build Server Ready!\n'));
+	console.log(chalk.bold('GitHub Deploy Key (add to your repos):'));
+	console.log(chalk.dim('─'.repeat(60)));
+	console.log(chalk.cyan(keyResult.publicKey));
+	console.log(chalk.dim('─'.repeat(60)));
+	console.log();
+	console.log(chalk.bold('Add to .env:'));
+	console.log(chalk.cyan(`BUILD_SERVER_HOST=${tailscaleIp}`));
+	console.log(chalk.cyan(`REGISTRY_URL=${tailscaleIp}:5000`));
+
+	await input({ message: '\nPress Enter to continue...' });
+}
+
+async function setupTargetServer(): Promise<void> {
+	log.header('Setup Target Server');
+
+	const method = await select({
+		message: 'How do you want to setup the target server?',
+		choices: [
+			{ name: 'Create new droplet on Digital Ocean', value: 'create' },
+			{ name: 'Use existing server (SSH host)', value: 'existing' },
+		],
+	});
+
+	let sshHost = '';
+
+	if (method === 'create') {
+		const name = await input({ message: 'Droplet name:', default: 'app-server-1' });
+		const region = await select({
+			message: 'Region:',
+			choices: DO.RECOMMENDED_REGIONS.map((r) => ({ name: r.name, value: r.slug })),
+		});
+		const size = await select({
+			message: 'Size:',
+			choices: DO.RECOMMENDED_SIZES.map((s) => ({ name: `${s.name} - $${s.price}/mo`, value: s.slug })),
+		});
+		const sshKeys = await DO.listSSHKeys();
+		const selectedKey = await select({
+			message: 'SSH key:',
+			choices: sshKeys.map((k) => ({ name: k.name, value: k.id.toString() })),
+		});
+
+		log.step('Creating droplet...');
+		const droplet = await DO.createDroplet({
+			name,
+			region,
+			size,
+			image: 'ubuntu-24-04-x64',
+			ssh_keys: [selectedKey],
+			tags: ['target-server'],
+		});
+
+		log.success(`Droplet created: ${droplet.name}`);
+		log.step('Waiting for IP...');
+
+		let publicIP = '';
+		for (let i = 0; i < 60; i++) {
+			await new Promise((r) => setTimeout(r, 2000));
+			const updated = await DO.getDroplet(droplet.id);
+			publicIP = DO.getPublicIP(updated) || '';
+			if (publicIP) break;
+			process.stdout.write('.');
+		}
+		console.log();
+
+		if (!publicIP) {
+			log.error('Failed to get IP');
+			return;
+		}
+
+		log.success(`IP: ${publicIP}`);
+		log.step('Waiting for SSH...');
+
+		sshHost = `root@${publicIP}`;
+		for (let i = 0; i < 30; i++) {
+			await new Promise((r) => setTimeout(r, 5000));
+			if (await SSH.testConnection(sshHost)) break;
+			process.stdout.write('.');
+		}
+		console.log();
+	} else {
+		sshHost = await input({
+			message: 'SSH host (e.g., root@1.2.3.4):',
+			validate: (v) => v.length > 0 || 'Required',
+		});
+	}
+
+	// Test connection
+	log.step('Testing SSH connection...');
+	if (!(await SSH.testConnection(sshHost))) {
+		log.error('Cannot connect');
+		await input({ message: 'Press Enter to go back...' });
+		return;
+	}
+	log.success('Connected');
+
+	// Update system
+	log.step('Updating system...');
+	await SSH.ssh(sshHost, 'apt-get update -qq && apt-get upgrade -y -qq');
+
+	// Docker
+	log.step('Installing Docker...');
+	const dockerCheck = await SSH.ssh(sshHost, 'docker --version');
+	if (dockerCheck.exitCode !== 0) {
+		await SSH.ssh(sshHost, 'curl -fsSL https://get.docker.com | sh');
+		await SSH.ssh(sshHost, 'systemctl enable docker && systemctl start docker');
+	}
+	log.success('Docker ready');
+
+	// Configure Docker for registry
+	if (process.env.REGISTRY_URL) {
+		log.step('Configuring Docker for private registry...');
+		const daemonJson = JSON.stringify({ 'insecure-registries': [process.env.REGISTRY_URL] }, null, 2);
+		await SSH.ssh(sshHost, `mkdir -p /etc/docker && echo '${daemonJson}' > /etc/docker/daemon.json && systemctl restart docker`);
+		log.success('Docker configured for registry');
+	}
+
+	// Tailscale
+	log.step('Setting up Tailscale...');
+	let tailscaleIp = '';
+	const tsCheck = await SSH.ssh(sshHost, 'tailscale ip -4 2>/dev/null');
+	if (tsCheck.exitCode !== 0) {
+		await SSH.ssh(sshHost, 'curl -fsSL https://tailscale.com/install.sh | sh');
+		const tsUp = await SSH.ssh(sshHost, 'tailscale up --timeout=10s 2>&1 || true');
+		if (tsUp.stdout.includes('https://')) {
+			const urlMatch = tsUp.stdout.match(/(https:\/\/login\.tailscale\.com\/[^\s]+)/);
+			if (urlMatch) {
+				log.warn('Tailscale needs auth!');
+				console.log(chalk.cyan(urlMatch[1]));
+				await input({ message: 'Press Enter after authenticating...' });
+			}
+		}
+		const ipResult = await SSH.ssh(sshHost, 'tailscale ip -4');
+		tailscaleIp = ipResult.stdout.trim();
+	} else {
+		tailscaleIp = tsCheck.stdout.trim();
+	}
+	log.success(`Tailscale IP: ${tailscaleIp}`);
+
+	// cloudflared
+	log.step('Installing cloudflared...');
+	const cfCheck = await SSH.ssh(sshHost, 'cloudflared --version');
+	if (cfCheck.exitCode !== 0) {
+		await SSH.ssh(
+			sshHost,
+			'curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb && dpkg -i /tmp/cloudflared.deb'
+		);
+	}
+	log.success('cloudflared installed');
+
+	// Cloudflare Tunnel
+	let tunnelId = '';
+	if (CF.hasCloudflareConfig()) {
+		const setupTunnel = await confirm({
+			message: 'Setup Cloudflare Tunnel?',
+			default: true,
+		});
+
+		if (setupTunnel) {
+			const tunnels = await CF.listTunnels();
+			const tunnelChoice = await select({
+				message: 'Tunnel:',
+				choices: [
+					...tunnels.map((t) => ({ name: `Use: ${t.name}`, value: t.id })),
+					{ name: 'Create new tunnel', value: 'new' },
+				],
+			});
+
+			if (tunnelChoice === 'new') {
+				const tunnelName = await input({ message: 'Tunnel name:', default: 'app-tunnel' });
+				const { tunnel, token } = await CF.createTunnel(tunnelName);
+				tunnelId = tunnel.id;
+				await SSH.ssh(sshHost, `cloudflared service install ${token}`);
+			} else {
+				tunnelId = tunnelChoice;
+				const token = await CF.getTunnelToken(tunnelId);
+				await SSH.ssh(sshHost, `cloudflared service install ${token}`);
+			}
+			log.success('Tunnel configured');
+		}
+	}
+
+	// iptables
+	log.step('Configuring iptables...');
+	await SSH.ssh(sshHost, 'DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent');
+	const iface = (await SSH.ssh(sshHost, "ip route | grep default | awk '{print $5}' | head -1")).stdout.trim() || 'eth0';
+
+	const rules = [
+		'iptables -F DOCKER-USER 2>/dev/null || true',
+		'iptables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT',
+		'iptables -A DOCKER-USER -i lo -j ACCEPT',
+		'iptables -A DOCKER-USER -s 100.64.0.0/10 -j ACCEPT',
+		'iptables -A DOCKER-USER -i br-+ -j ACCEPT',
+		'iptables -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 80 -j ACCEPT',
+		'iptables -A DOCKER-USER -p tcp -m conntrack --ctorigdstport 443 -j ACCEPT',
+		`iptables -A DOCKER-USER -i ${iface} -j DROP`,
+		'iptables -A DOCKER-USER -j RETURN',
+	];
+	await SSH.ssh(sshHost, rules.join(' && '));
+	await SSH.ssh(sshHost, 'netfilter-persistent save');
+	log.success('iptables configured');
+
+	// Register in DB
+	const serverInfo = await SSH.getServerInfo(sshHost);
+	const existing = DB.getServerByTailscaleIp(tailscaleIp);
+	if (!existing && tailscaleIp) {
+		DB.createServer({
+			name: serverInfo.hostname || 'app-server',
+			tailscale_ip: tailscaleIp,
+			public_ip: sshHost.includes('@') ? sshHost.split('@')[1] : null,
+			role: 'worker',
+			tunnel_id: tunnelId || undefined,
+		});
+		log.success('Server registered in database');
+	}
+
+	// Summary
+	console.log(chalk.bold.green('\n✓ Target Server Ready!\n'));
+	console.log(`  Name: ${serverInfo.hostname}`);
+	console.log(`  Tailscale IP: ${tailscaleIp}`);
+	if (tunnelId) console.log(`  Tunnel: ${tunnelId}`);
+	console.log();
+	console.log(chalk.bold('Next:'));
+	console.log('  Projects & Deploy → Add Project');
+
+	await input({ message: '\nPress Enter to continue...' });
 }
 
 async function showServerStatus(): Promise<void> {
@@ -1147,6 +1975,1087 @@ async function servicesMenu(): Promise<void> {
 	}
 
 	await input({ message: 'Press Enter to go back...' });
+}
+
+// ============ Cloudflare Menu ============
+
+async function cloudflareMenu(): Promise<void> {
+	console.clear();
+	log.header('🌐  Cloudflare');
+
+	if (!CF.hasCloudflareConfig()) {
+		log.error('CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID not set');
+		log.info('Add to your .env file:');
+		log.info('  CLOUDFLARE_API_TOKEN=your_token');
+		log.info('  CLOUDFLARE_ACCOUNT_ID=your_account_id');
+		await input({ message: 'Press Enter to go back...' });
+		return;
+	}
+
+	const choice = await select({
+		message: 'Cloudflare Options:',
+		choices: [
+			{ name: '📋  List Zones (Domains)', value: 'zones' },
+			{ name: '📝  DNS Records', value: 'dns' },
+			{ name: '🚇  Tunnels', value: 'tunnels' },
+			{ name: '←   Back', value: 'back' },
+		],
+	});
+
+	switch (choice) {
+		case 'zones':
+			await listCfZones();
+			break;
+		case 'dns':
+			await cfDnsMenu();
+			break;
+		case 'tunnels':
+			await cfTunnelsMenu();
+			break;
+		case 'back':
+			return;
+	}
+
+	await cloudflareMenu();
+}
+
+async function listCfZones(): Promise<void> {
+	log.step('Fetching zones...');
+	try {
+		const zones = await CF.listZones();
+
+		if (zones.length === 0) {
+			log.warn('No zones found');
+		} else {
+			console.log('\n' + chalk.bold('Your Domains:'));
+			console.log(chalk.dim('─'.repeat(60)));
+
+			for (const z of zones) {
+				const statusColor = z.status === 'active' ? chalk.green : chalk.yellow;
+				console.log(`  ${statusColor('●')} ${chalk.bold(z.name)}`);
+				console.log(`    ${chalk.dim('Status:')} ${z.status}`);
+				console.log(`    ${chalk.dim('Nameservers:')} ${z.name_servers.join(', ')}`);
+				console.log();
+			}
+		}
+	} catch (error) {
+		log.error(`Failed to list zones: ${error}`);
+	}
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function cfDnsMenu(): Promise<void> {
+	try {
+		const zones = await CF.listZones();
+
+		if (zones.length === 0) {
+			log.warn('No zones found');
+			await input({ message: 'Press Enter to go back...' });
+			return;
+		}
+
+		const zoneId = await select({
+			message: 'Select domain:',
+			choices: [
+				...zones.map((z) => ({ name: z.name, value: z.id })),
+				{ name: '← Cancel', value: '' },
+			],
+		});
+
+		if (!zoneId) return;
+
+		const zone = zones.find((z) => z.id === zoneId)!;
+
+		const choice = await select({
+			message: `DNS for ${zone.name}:`,
+			choices: [
+				{ name: '📋  List Records', value: 'list' },
+				{ name: '➕  Add A Record', value: 'add-a' },
+				{ name: '➕  Add CNAME Record', value: 'add-cname' },
+				{ name: '🗑️  Delete Record', value: 'delete' },
+				{ name: '←   Back', value: 'back' },
+			],
+		});
+
+		switch (choice) {
+			case 'list':
+				await listCfDnsRecords(zoneId, zone.name);
+				break;
+			case 'add-a':
+				await addCfARecord(zoneId, zone.name);
+				break;
+			case 'add-cname':
+				await addCfCnameRecord(zoneId, zone.name);
+				break;
+			case 'delete':
+				await deleteCfDnsRecord(zoneId, zone.name);
+				break;
+		}
+	} catch (error) {
+		log.error(`DNS operation failed: ${error}`);
+		await input({ message: 'Press Enter to continue...' });
+	}
+}
+
+async function listCfDnsRecords(zoneId: string, zoneName: string): Promise<void> {
+	log.step('Fetching DNS records...');
+	try {
+		const records = await CF.listDnsRecords(zoneId);
+
+		// Group by type
+		const grouped: Record<string, typeof records> = {};
+		for (const r of records) {
+			if (!grouped[r.type]) grouped[r.type] = [];
+			grouped[r.type].push(r);
+		}
+
+		console.log('\n' + chalk.bold(`DNS Records for ${zoneName}:`));
+		console.log(chalk.dim('─'.repeat(80)));
+
+		for (const type of Object.keys(grouped).sort()) {
+			console.log(chalk.bold.cyan(`\n${type} Records:`));
+			for (const r of grouped[type]) {
+				const proxied = r.proxied ? chalk.yellow(' (proxied)') : '';
+				console.log(`  ${chalk.bold(r.name)} → ${r.content}${proxied}`);
+				console.log(`    ${chalk.dim(`TTL: ${r.ttl === 1 ? 'Auto' : r.ttl + 's'} | ID: ${r.id}`)}`);
+			}
+		}
+		console.log();
+	} catch (error) {
+		log.error(`Failed to list records: ${error}`);
+	}
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function addCfARecord(zoneId: string, zoneName: string): Promise<void> {
+	try {
+		const name = await input({
+			message: `Subdomain (or @ for ${zoneName}):`,
+			default: '@',
+		});
+
+		const content = await input({
+			message: 'IPv4 Address:',
+			validate: (v) => /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v) || 'Invalid IP',
+		});
+
+		const proxied = await confirm({
+			message: 'Enable Cloudflare proxy (orange cloud)?',
+			default: true,
+		});
+
+		log.step('Creating A record...');
+		const record = await CF.createARecord(zoneId, name === '@' ? zoneName : name, content, proxied);
+		log.success(`Created: ${record.name} → ${record.content}`);
+	} catch (error) {
+		log.error(`Failed to create record: ${error}`);
+	}
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function addCfCnameRecord(zoneId: string, zoneName: string): Promise<void> {
+	try {
+		const name = await input({
+			message: 'Subdomain:',
+			validate: (v) => v.length > 0 || 'Required',
+		});
+
+		const content = await input({
+			message: 'Target hostname:',
+			validate: (v) => v.length > 0 || 'Required',
+		});
+
+		const proxied = await confirm({
+			message: 'Enable Cloudflare proxy (orange cloud)?',
+			default: true,
+		});
+
+		log.step('Creating CNAME record...');
+		const record = await CF.createCnameRecord(zoneId, name, content, proxied);
+		log.success(`Created: ${record.name} → ${record.content}`);
+	} catch (error) {
+		log.error(`Failed to create record: ${error}`);
+	}
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function deleteCfDnsRecord(zoneId: string, zoneName: string): Promise<void> {
+	try {
+		const records = await CF.listDnsRecords(zoneId);
+		const deletable = records.filter((r) => r.type !== 'NS' && r.type !== 'SOA');
+
+		if (deletable.length === 0) {
+			log.warn('No deletable records found');
+			return;
+		}
+
+		const recordId = await select({
+			message: 'Select record to delete:',
+			choices: [
+				...deletable.map((r) => ({
+					name: `${r.type} | ${r.name} → ${r.content}`,
+					value: r.id,
+				})),
+				{ name: '← Cancel', value: '' },
+			],
+		});
+
+		if (!recordId) return;
+
+		const confirmDelete = await confirm({
+			message: chalk.red('Are you sure you want to delete this record?'),
+			default: false,
+		});
+
+		if (!confirmDelete) return;
+
+		log.step('Deleting record...');
+		await CF.deleteDnsRecord(zoneId, recordId);
+		log.success('Record deleted');
+	} catch (error) {
+		log.error(`Failed to delete record: ${error}`);
+	}
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function cfTunnelsMenu(): Promise<void> {
+	const choice = await select({
+		message: 'Tunnel Options:',
+		choices: [
+			{ name: '📋  List Tunnels', value: 'list' },
+			{ name: '➕  Create Tunnel', value: 'create' },
+			{ name: '🔗  View Routes', value: 'routes' },
+			{ name: '➕  Add Route', value: 'add-route' },
+			{ name: '🗑️  Delete Tunnel', value: 'delete' },
+			{ name: '←   Back', value: 'back' },
+		],
+	});
+
+	try {
+		switch (choice) {
+			case 'list':
+				await listCfTunnels();
+				break;
+			case 'create':
+				await createCfTunnel();
+				break;
+			case 'routes':
+				await viewTunnelRoutes();
+				break;
+			case 'add-route':
+				await addTunnelRoute();
+				break;
+			case 'delete':
+				await deleteCfTunnel();
+				break;
+			case 'back':
+				return;
+		}
+	} catch (error) {
+		log.error(`Tunnel operation failed: ${error}`);
+		await input({ message: 'Press Enter to continue...' });
+	}
+
+	await cfTunnelsMenu();
+}
+
+async function listCfTunnels(): Promise<void> {
+	log.step('Fetching tunnels...');
+	const tunnels = await CF.listTunnels();
+
+	if (tunnels.length === 0) {
+		log.warn('No tunnels found');
+	} else {
+		console.log('\n' + chalk.bold('Your Tunnels:'));
+		console.log(chalk.dim('─'.repeat(60)));
+
+		for (const t of tunnels) {
+			const statusColor = t.status === 'healthy' ? chalk.green : chalk.yellow;
+			const connections = t.connections.length;
+			console.log(`  ${statusColor('●')} ${chalk.bold(t.name)}`);
+			console.log(`    ${chalk.dim('ID:')} ${t.id}`);
+			console.log(`    ${chalk.dim('Status:')} ${t.status}`);
+			console.log(`    ${chalk.dim('Connections:')} ${connections}`);
+			if (t.connections.length > 0) {
+				const conn = t.connections[0];
+				console.log(`    ${chalk.dim('Location:')} ${conn.colo_name}`);
+			}
+			console.log();
+		}
+	}
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function createCfTunnel(): Promise<void> {
+	const name = await input({
+		message: 'Tunnel name:',
+		validate: (v) => v.length > 0 || 'Required',
+	});
+
+	log.step('Creating tunnel...');
+	const { tunnel, token } = await CF.createTunnel(name);
+
+	log.success(`Tunnel created: ${tunnel.name}`);
+	console.log();
+	console.log(chalk.bold('Tunnel Token:'));
+	console.log(chalk.cyan(token));
+	console.log();
+	console.log(chalk.bold('To connect a server, run:'));
+	console.log(chalk.dim(`  cloudflared service install ${token}`));
+	console.log();
+
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function viewTunnelRoutes(): Promise<void> {
+	const tunnels = await CF.listTunnels();
+
+	if (tunnels.length === 0) {
+		log.warn('No tunnels found');
+		return;
+	}
+
+	const tunnelId = await select({
+		message: 'Select tunnel:',
+		choices: [
+			...tunnels.map((t) => ({ name: `${t.name} (${t.status})`, value: t.id })),
+			{ name: '← Cancel', value: '' },
+		],
+	});
+
+	if (!tunnelId) return;
+
+	log.step('Fetching tunnel config...');
+	const config = await CF.getTunnelConfig(tunnelId);
+
+	console.log('\n' + chalk.bold('Tunnel Routes:'));
+	console.log(chalk.dim('─'.repeat(60)));
+
+	for (const ingress of config.ingress) {
+		if (ingress.hostname) {
+			console.log(`  ${chalk.bold(ingress.hostname)} → ${chalk.cyan(ingress.service)}`);
+		} else {
+			console.log(`  ${chalk.dim('(catch-all)')} → ${ingress.service}`);
+		}
+	}
+	console.log();
+
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function addTunnelRoute(): Promise<void> {
+	const tunnels = await CF.listTunnels();
+
+	if (tunnels.length === 0) {
+		log.warn('No tunnels found. Create a tunnel first.');
+		return;
+	}
+
+	const tunnelId = await select({
+		message: 'Select tunnel:',
+		choices: tunnels.map((t) => ({ name: `${t.name} (${t.status})`, value: t.id })),
+	});
+
+	const hostname = await input({
+		message: 'Hostname (e.g., app.example.com):',
+		validate: (v) => v.includes('.') || 'Invalid hostname',
+	});
+
+	const service = await input({
+		message: 'Service URL (e.g., http://localhost:3000):',
+		default: 'http://localhost:3000',
+	});
+
+	log.step('Adding route...');
+	await CF.addTunnelRoute(tunnelId, hostname, service);
+	log.success(`Route added: ${hostname} → ${service}`);
+
+	const createDns = await confirm({
+		message: 'Create DNS CNAME record for this hostname?',
+		default: true,
+	});
+
+	if (createDns) {
+		const zones = await CF.listZones();
+		// Find matching zone
+		const matchingZone = zones.find((z) => hostname.endsWith(z.name));
+
+		if (matchingZone) {
+			const subdomain = hostname.replace(`.${matchingZone.name}`, '');
+			await CF.createDnsRecord(matchingZone.id, {
+				type: 'CNAME',
+				name: subdomain,
+				content: `${tunnelId}.cfargotunnel.com`,
+				proxied: true,
+			});
+			log.success(`DNS record created: ${hostname} → tunnel`);
+		} else {
+			log.warn('No matching zone found for this hostname');
+		}
+	}
+
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function deleteCfTunnel(): Promise<void> {
+	const tunnels = await CF.listTunnels();
+
+	if (tunnels.length === 0) {
+		log.warn('No tunnels found');
+		return;
+	}
+
+	const tunnelId = await select({
+		message: 'Select tunnel to delete:',
+		choices: [
+			...tunnels.map((t) => ({ name: `${t.name} (${t.connections.length} connections)`, value: t.id })),
+			{ name: '← Cancel', value: '' },
+		],
+	});
+
+	if (!tunnelId) return;
+
+	const tunnel = tunnels.find((t) => t.id === tunnelId)!;
+
+	if (tunnel.connections.length > 0) {
+		log.warn('This tunnel has active connections!');
+	}
+
+	const confirmDelete = await confirm({
+		message: chalk.red(`Delete tunnel "${tunnel.name}"? This cannot be undone!`),
+		default: false,
+	});
+
+	if (!confirmDelete) return;
+
+	log.step('Deleting tunnel...');
+	await CF.deleteTunnel(tunnelId);
+	log.success('Tunnel deleted');
+
+	await input({ message: 'Press Enter to continue...' });
+}
+
+// ============ Projects Menu ============
+
+async function projectsMenu(): Promise<void> {
+	console.clear();
+	log.header('🚀  Projects & Deploy');
+
+	const choice = await select({
+		message: 'Project Options:',
+		choices: [
+			{ name: '📋  List Projects', value: 'list' },
+			{ name: '➕  Add Project', value: 'add' },
+			{ name: '🚀  Deploy / Update', value: 'deploy' },
+			{ name: '📜  Deployment History', value: 'history' },
+			{ name: '↩️   Rollback', value: 'rollback' },
+			{ name: '🔧  Edit Project', value: 'edit' },
+			{ name: '🗑️  Delete Project', value: 'delete' },
+			{ name: '←   Back', value: 'back' },
+		],
+	});
+
+	try {
+		switch (choice) {
+			case 'list':
+				await listProjects();
+				break;
+			case 'add':
+				await addProject();
+				break;
+			case 'deploy':
+				await deployProject();
+				break;
+			case 'history':
+				await viewDeploymentHistory();
+				break;
+			case 'rollback':
+				await rollbackProject();
+				break;
+			case 'edit':
+				await editProject();
+				break;
+			case 'delete':
+				await deleteProject();
+				break;
+			case 'back':
+				return;
+		}
+	} catch (error) {
+		log.error(`Operation failed: ${error}`);
+		await input({ message: 'Press Enter to continue...' });
+	}
+
+	await projectsMenu();
+}
+
+async function listProjects(): Promise<void> {
+	const projects = DB.listProjects();
+
+	if (projects.length === 0) {
+		log.warn('No projects found. Add one with "Add Project"');
+	} else {
+		console.log('\n' + chalk.bold('Your Projects:'));
+		console.log(chalk.dim('─'.repeat(80)));
+
+		for (const p of projects) {
+			const slotColor = p.current_slot === 'blue' ? chalk.blue : p.current_slot === 'green' ? chalk.green : chalk.gray;
+			const slot = p.current_slot ? slotColor(`[${p.current_slot}]`) : chalk.gray('[not deployed]');
+			const typeIcon = p.deploy_type === 'compose' ? '📦' : '🐳';
+
+			console.log(`  ${typeIcon} ${chalk.bold(p.name)} ${slot}`);
+			console.log(`    ${chalk.dim('Repo:')} ${p.repo_url} (${p.repo_branch})`);
+			if (p.domain && !p.domain.startsWith('internal-')) {
+				console.log(`    ${chalk.dim('Domain:')} ${p.domain}`);
+			} else {
+				console.log(`    ${chalk.dim('Access:')} ${chalk.yellow('Internal only (Tailscale)')}`);
+			}
+			console.log(`    ${chalk.dim('Server:')} ${p.target_server}`);
+			if (p.current_image_tag) {
+				console.log(`    ${chalk.dim('Image:')} ${p.current_image_tag}`);
+			}
+			console.log();
+		}
+	}
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function addProject(): Promise<void> {
+	log.header('Add New Project');
+
+	let repoUrl = '';
+	let repoBranch = 'main';
+	let isPrivate = false;
+	let suggestedName = '';
+
+	// Check if GitHub token is available
+	if (GitHub.hasGitHubToken()) {
+		const repoSource = await select({
+			message: 'How do you want to select the repository?',
+			choices: [
+				{ name: '📋  Select from GitHub', value: 'github' },
+				{ name: '✏️   Enter URL manually', value: 'manual' },
+			],
+		});
+
+		if (repoSource === 'github') {
+			try {
+				log.step('Loading GitHub repositories...');
+
+				// Get user and orgs
+				const user = await GitHub.getCurrentUser();
+				const orgs = await GitHub.listOrganizations();
+
+				// Ask which account
+				const accountChoices = [
+					{ name: `👤 ${user.login} (personal)`, value: user.login },
+					...orgs.map((o) => ({ name: `🏢 ${o.login}`, value: o.login })),
+				];
+
+				const account = await select({
+					message: 'Select account:',
+					choices: accountChoices,
+				});
+
+				// Load repos for selected account
+				log.step(`Loading repositories for ${account}...`);
+				const repos =
+					account === user.login
+						? await GitHub.listUserRepos()
+						: await GitHub.listOrgRepos(account);
+
+				if (repos.length === 0) {
+					log.warn('No repositories found');
+					await input({ message: 'Press Enter to continue...' });
+					return;
+				}
+
+				// Select repo
+				const selectedRepo = await select({
+					message: 'Select repository:',
+					choices: repos.map((r) => ({
+						name: `${r.private ? '🔒' : '🌐'} ${r.name} ${r.language ? chalk.dim(`(${r.language})`) : ''} ${r.description ? chalk.dim('- ' + r.description.substring(0, 40)) : ''}`,
+						value: r,
+					})),
+				});
+
+				repoUrl = selectedRepo.ssh_url;
+				isPrivate = selectedRepo.private;
+				suggestedName = selectedRepo.name;
+
+				// Load branches
+				log.step('Loading branches...');
+				const parsed = GitHub.parseGitHubUrl(repoUrl);
+				if (parsed) {
+					const branches = await GitHub.listBranches(parsed.owner, parsed.repo);
+					repoBranch = await select({
+						message: 'Select branch:',
+						choices: branches.map((b) => ({
+							name: b.name + (b.name === selectedRepo.default_branch ? chalk.dim(' (default)') : ''),
+							value: b.name,
+						})),
+					});
+				}
+
+				log.success(`Selected: ${selectedRepo.full_name} (${repoBranch})`);
+			} catch (error) {
+				log.error(`GitHub API error: ${error}`);
+				log.info('Falling back to manual entry');
+			}
+		}
+	}
+
+	// Manual entry if not selected from GitHub
+	if (!repoUrl) {
+		repoUrl = await input({
+			message: 'Git repository URL:',
+			validate: (v) => v.includes('github.com') || v.includes('git@') || 'Invalid git URL',
+		});
+
+		repoBranch = await input({
+			message: 'Branch:',
+			default: 'main',
+		});
+
+		isPrivate = await confirm({
+			message: 'Is this a private repository?',
+			default: false,
+		});
+	}
+
+	const name = await input({
+		message: 'Project name:',
+		default: suggestedName,
+		validate: (v) => {
+			if (!v) return 'Required';
+			if (DB.getProjectByName(v)) return 'Project already exists';
+			return true;
+		},
+	});
+
+	// Deployment type
+	const deployType = await select({
+		message: 'Deployment type:',
+		choices: [
+			{ name: '🐳  Dockerfile - Build image from Dockerfile', value: 'dockerfile' },
+			{ name: '📦  Docker Compose - Use docker-compose.yaml', value: 'compose' },
+		],
+	});
+
+	let buildContext = '.';
+	let dockerfile = 'Dockerfile';
+	let buildScript: string | null = null;
+
+	if (deployType === 'dockerfile') {
+		buildContext = await input({
+			message: 'Build context (directory with Dockerfile):',
+			default: '.',
+		});
+
+		dockerfile = await input({
+			message: 'Dockerfile name:',
+			default: 'Dockerfile',
+		});
+
+		const hasBuildScript = await confirm({
+			message: 'Run a build script before docker build?',
+			default: false,
+		});
+
+		if (hasBuildScript) {
+			buildScript = await input({
+				message: 'Path to build script:',
+				default: './build.sh',
+			});
+		}
+	} else {
+		// Docker Compose
+		const composePath = await input({
+			message: 'Path to docker-compose file:',
+			default: 'docker-compose.yaml',
+		});
+		// Store compose path in dockerfile field for now
+		dockerfile = composePath;
+		buildContext = 'compose'; // Flag to indicate compose mode
+	}
+
+	// Get servers
+	const servers = DB.listActiveServers('worker');
+	if (servers.length === 0) {
+		log.warn('No worker servers registered. Add one in Servers menu first.');
+		await input({ message: 'Press Enter to go back...' });
+		return;
+	}
+
+	const targetServer = await select({
+		message: 'Target server for deployment:',
+		choices: servers.map((s) => ({
+			name: `${s.name} (${s.tailscale_ip})`,
+			value: s.tailscale_ip,
+		})),
+	});
+
+	// Domain - optional
+	const hasPublicUrl = await confirm({
+		message: 'Does this service need a public URL?',
+		default: true,
+	});
+
+	let domain = '';
+	let healthCheckPath = '/health';
+
+	if (hasPublicUrl) {
+		domain = await input({
+			message: 'Domain (e.g., app.example.com):',
+			validate: (v) => v.includes('.') || 'Invalid domain',
+		});
+
+		healthCheckPath = await input({
+			message: 'Health check path:',
+			default: '/health',
+		});
+	} else {
+		// Internal service - generate internal identifier
+		domain = `internal-${name}`;
+		log.info(`Internal service - accessible via Tailscale only`);
+	}
+
+	const hasEnvVars = await confirm({
+		message: 'Add environment variables?',
+		default: false,
+	});
+
+	let envVars: Record<string, string> = {};
+	if (hasEnvVars) {
+		const envInput = await input({
+			message: 'Environment variables (KEY=value, comma-separated):',
+		});
+		for (const pair of envInput.split(',')) {
+			const [key, ...valueParts] = pair.trim().split('=');
+			if (key && valueParts.length > 0) {
+				envVars[key.trim()] = valueParts.join('=').trim();
+			}
+		}
+	}
+
+	const project = DB.createProject({
+		name,
+		repo_url: GitHub.toSSHUrl(repoUrl),
+		repo_branch: repoBranch,
+		is_private: isPrivate,
+		deploy_type: deployType as 'dockerfile' | 'compose',
+		build_context: buildContext,
+		dockerfile,
+		build_script: buildScript,
+		target_server: targetServer,
+		domain: domain || null,
+		health_check_path: healthCheckPath,
+		env_vars: envVars,
+	});
+
+	log.success(`Project "${project.name}" created!`);
+	console.log();
+	console.log(chalk.bold('Webhook Secret:'));
+	console.log(chalk.cyan(project.webhook_secret));
+	console.log();
+
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function deployProject(): Promise<void> {
+	const projects = DB.listProjects();
+
+	if (projects.length === 0) {
+		log.warn('No projects found');
+		return;
+	}
+
+	// Check build server
+	try {
+		const buildStatus = await Build.checkBuildServer();
+		if (!buildStatus.ready) {
+			log.error('Build server not ready!');
+			if (!buildStatus.docker) log.error('  - Docker not installed');
+			if (!buildStatus.registry) log.error('  - Registry not running');
+			if (!buildStatus.git) log.error('  - Git not installed');
+			log.info('Run: bun scripts/setup-build-server.ts');
+			await input({ message: 'Press Enter to go back...' });
+			return;
+		}
+	} catch (error) {
+		log.error(`Build server error: ${error}`);
+		log.info('Make sure BUILD_SERVER_HOST is configured in .env');
+		await input({ message: 'Press Enter to go back...' });
+		return;
+	}
+
+	const projectId = await select({
+		message: 'Select project to deploy:',
+		choices: [
+			...projects.map((p) => ({
+				name: `${p.name} (${p.domain})`,
+				value: p.id,
+			})),
+			{ name: '← Cancel', value: '' },
+		],
+	});
+
+	if (!projectId) return;
+
+	const project = DB.getProject(projectId)!;
+
+	console.log();
+	log.info(`Project: ${chalk.bold(project.name)}`);
+	log.info(`Repository: ${project.repo_url} (${project.repo_branch})`);
+	log.info(`Target: ${project.target_server}`);
+	log.info(`Domain: ${project.domain}`);
+	console.log();
+
+	const proceed = await confirm({
+		message: 'Start deployment?',
+		default: true,
+	});
+
+	if (!proceed) return;
+
+	console.log();
+	console.log(chalk.bold('Starting deployment...\n'));
+
+	const result = await Deploy.fullDeploy(project);
+
+	console.log();
+	if (result.success) {
+		log.success('Deployment completed successfully!');
+		log.info(`View at: https://${project.domain}`);
+	} else {
+		log.error(`Deployment failed: ${result.error}`);
+	}
+
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function viewDeploymentHistory(): Promise<void> {
+	const projects = DB.listProjects();
+
+	if (projects.length === 0) {
+		log.warn('No projects found');
+		return;
+	}
+
+	const projectId = await select({
+		message: 'Select project:',
+		choices: [
+			...projects.map((p) => ({ name: p.name, value: p.id })),
+			{ name: '← Cancel', value: '' },
+		],
+	});
+
+	if (!projectId) return;
+
+	const deployments = DB.listDeployments(projectId);
+
+	if (deployments.length === 0) {
+		log.warn('No deployments found for this project');
+	} else {
+		console.log('\n' + chalk.bold('Deployment History:'));
+		console.log(chalk.dim('─'.repeat(80)));
+
+		for (const d of deployments) {
+			const stateColor =
+				d.state === 'completed'
+					? chalk.green
+					: d.state === 'failed'
+						? chalk.red
+						: chalk.yellow;
+
+			console.log(`  ${stateColor('●')} ${d.commit_sha.substring(0, 8)} - ${d.state}`);
+			console.log(`    ${chalk.dim('Started:')} ${d.started_at}`);
+			if (d.finished_at) console.log(`    ${chalk.dim('Finished:')} ${d.finished_at}`);
+			if (d.error) console.log(`    ${chalk.red('Error:')} ${d.error}`);
+			console.log();
+		}
+	}
+
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function rollbackProject(): Promise<void> {
+	const projects = DB.listProjects();
+
+	if (projects.length === 0) {
+		log.warn('No projects found');
+		return;
+	}
+
+	const projectId = await select({
+		message: 'Select project to rollback:',
+		choices: [
+			...projects.map((p) => ({ name: p.name, value: p.id })),
+			{ name: '← Cancel', value: '' },
+		],
+	});
+
+	if (!projectId) return;
+
+	const project = DB.getProject(projectId)!;
+	const deployments = DB.listDeployments(projectId).filter((d) => d.state === 'completed');
+
+	if (deployments.length < 2) {
+		log.warn('Need at least 2 successful deployments to rollback');
+		await input({ message: 'Press Enter to go back...' });
+		return;
+	}
+
+	const targetDeploymentId = await select({
+		message: 'Rollback to which deployment?',
+		choices: [
+			...deployments.slice(1).map((d) => ({
+				name: `${d.commit_sha.substring(0, 8)} - ${d.started_at}${d.commit_message ? ' - ' + d.commit_message : ''}`,
+				value: d.id,
+			})),
+			{ name: '← Cancel', value: '' },
+		],
+	});
+
+	if (!targetDeploymentId) return;
+
+	const targetDeployment = DB.getDeployment(targetDeploymentId)!;
+
+	const confirmRollback = await confirm({
+		message: chalk.yellow(`Rollback to ${targetDeployment.commit_sha.substring(0, 8)}?`),
+		default: false,
+	});
+
+	if (!confirmRollback) return;
+
+	console.log();
+	console.log(chalk.bold('Starting rollback...\n'));
+
+	const result = await Deploy.rollback(project, targetDeployment);
+
+	console.log();
+	if (result.success) {
+		log.success('Rollback completed successfully!');
+	} else {
+		log.error(`Rollback failed: ${result.error}`);
+	}
+
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function editProject(): Promise<void> {
+	const projects = DB.listProjects();
+
+	if (projects.length === 0) {
+		log.warn('No projects found');
+		return;
+	}
+
+	const projectId = await select({
+		message: 'Select project to edit:',
+		choices: [
+			...projects.map((p) => ({ name: p.name, value: p.id })),
+			{ name: '← Cancel', value: '' },
+		],
+	});
+
+	if (!projectId) return;
+
+	const project = DB.getProject(projectId)!;
+
+	const field = await select({
+		message: 'What to edit?',
+		choices: [
+			{ name: `Branch (${project.repo_branch})`, value: 'branch' },
+			{ name: `Build context (${project.build_context})`, value: 'context' },
+			{ name: `Health check (${project.health_check_path})`, value: 'health' },
+			{ name: 'Environment variables', value: 'env' },
+			{ name: '← Cancel', value: '' },
+		],
+	});
+
+	if (!field) return;
+
+	switch (field) {
+		case 'branch': {
+			const newBranch = await input({
+				message: 'New branch:',
+				default: project.repo_branch,
+			});
+			DB.updateProject(projectId, { repo_branch: newBranch });
+			break;
+		}
+		case 'context': {
+			const newContext = await input({
+				message: 'New build context:',
+				default: project.build_context,
+			});
+			DB.updateProject(projectId, { build_context: newContext });
+			break;
+		}
+		case 'health': {
+			const newPath = await input({
+				message: 'New health check path:',
+				default: project.health_check_path,
+			});
+			DB.updateProject(projectId, { health_check_path: newPath });
+			break;
+		}
+		case 'env': {
+			const currentEnv = Object.entries(project.env_vars)
+				.map(([k, v]) => `${k}=${v}`)
+				.join(', ');
+			const newEnv = await input({
+				message: 'Environment variables (KEY=value, comma-separated):',
+				default: currentEnv,
+			});
+			const envVars: Record<string, string> = {};
+			for (const pair of newEnv.split(',')) {
+				const [key, ...valueParts] = pair.trim().split('=');
+				if (key && valueParts.length > 0) {
+					envVars[key.trim()] = valueParts.join('=').trim();
+				}
+			}
+			DB.updateProject(projectId, { env_vars: envVars });
+			break;
+		}
+	}
+
+	log.success('Project updated!');
+	await input({ message: 'Press Enter to continue...' });
+}
+
+async function deleteProject(): Promise<void> {
+	const projects = DB.listProjects();
+
+	if (projects.length === 0) {
+		log.warn('No projects found');
+		return;
+	}
+
+	const projectId = await select({
+		message: 'Select project to delete:',
+		choices: [
+			...projects.map((p) => ({ name: p.name, value: p.id })),
+			{ name: '← Cancel', value: '' },
+		],
+	});
+
+	if (!projectId) return;
+
+	const project = DB.getProject(projectId)!;
+
+	const confirmDelete = await confirm({
+		message: chalk.red(`Delete project "${project.name}"? This will remove all deployment history!`),
+		default: false,
+	});
+
+	if (!confirmDelete) return;
+
+	DB.deleteProject(projectId);
+	log.success('Project deleted');
+
+	await input({ message: 'Press Enter to continue...' });
 }
 
 // ============ Web Dashboard ============
