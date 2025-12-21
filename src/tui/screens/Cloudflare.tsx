@@ -54,6 +54,9 @@ export default function Cloudflare({ focused }: CloudflareProps) {
     proxied: true,
   });
 
+  // Delete progress
+  const [deleteInProgress, setDeleteInProgress] = useState(false);
+
   const loadZones = async () => {
     setLoading(true);
     setError(null);
@@ -88,7 +91,8 @@ export default function Cloudflare({ focused }: CloudflareProps) {
     loadZones();
   }, []);
 
-  const selectedRecord = mode === "records" ? records[selectedIndex] : null;
+  // Don't reset selectedRecord when mode changes (needed for delete modal)
+  const selectedRecord = records[selectedIndex] || null;
 
   useInput(
     (input, key) => {
@@ -138,36 +142,43 @@ export default function Cloudflare({ focused }: CloudflareProps) {
 
   useInput(
     (_, key) => {
-      if (key.escape && mode !== "zones" && mode !== "records") {
+      if (key.escape) {
         setMode("records");
       }
     },
-    { isActive: mode === "add" || mode === "delete" },
+    { isActive: mode === "add" }, // Only for add mode, delete uses Modal
   );
 
-  if (loading && (zones.length === 0 || records.length === 0)) {
-    return <Spinner label="Loading..." />;
-  }
-
-  if (error) {
-    return (
-      <Box flexDirection="column">
-        <Text color={colors.error}>Error: {error}</Text>
-        <Text color={colors.muted}>Press 'r' to retry</Text>
-      </Box>
-    );
-  }
-
+  // Show delete modal first (before loading check)
   if (mode === "delete" && selectedRecord && selectedZone) {
+    // Show progress if deleting
+    if (deleteInProgress) {
+      return (
+        <Box flexDirection="column" padding={1}>
+          <Text bold color={colors.primary}>
+            Deleting DNS Record
+          </Text>
+          <Box marginY={1}>
+            <Spinner label={`Deleting ${selectedRecord.name}...`} />
+          </Box>
+        </Box>
+      );
+    }
+
     return (
       <Modal
         title="Delete DNS Record"
         message={`Delete ${selectedRecord.type} record "${selectedRecord.name}"?`}
         type="confirm"
         onConfirm={async () => {
+          setDeleteInProgress(true);
+          logger.info(
+            `Starting delete: ${selectedRecord.type} ${selectedRecord.name}`,
+            "cloudflare",
+          );
           try {
             logger.info(
-              `Deleting DNS record: ${selectedRecord.type} ${selectedRecord.name}`,
+              `Calling CF.deleteDnsRecord(${selectedZone.id}, ${selectedRecord.id})`,
               "cloudflare",
             );
             await CF.deleteDnsRecord(selectedZone.id, selectedRecord.id);
@@ -175,8 +186,10 @@ export default function Cloudflare({ focused }: CloudflareProps) {
               `Deleted DNS record: ${selectedRecord.name}`,
               "cloudflare",
             );
+            logger.info("Reloading records...", "cloudflare");
             await loadRecords(selectedZone.id);
             setSelectedIndex(Math.max(0, selectedIndex - 1));
+            logger.info("Records reloaded", "cloudflare");
           } catch (err) {
             const errMsg = err instanceof Error ? err.message : String(err);
             logger.error(
@@ -185,6 +198,7 @@ export default function Cloudflare({ focused }: CloudflareProps) {
             );
             setError(errMsg);
           }
+          setDeleteInProgress(false);
           setMode("records");
         }}
         onCancel={() => setMode("records")}
@@ -274,6 +288,24 @@ export default function Cloudflare({ focused }: CloudflareProps) {
           )}
         </Box>
         <Text color={colors.muted}>Press Esc to cancel</Text>
+      </Box>
+    );
+  }
+
+  // Show loading/error after modals
+  if (loading && zones.length === 0) {
+    return <Spinner label="Loading zones..." />;
+  }
+
+  if (loading && mode === "records" && records.length === 0) {
+    return <Spinner label="Loading records..." />;
+  }
+
+  if (error) {
+    return (
+      <Box flexDirection="column">
+        <Text color={colors.error}>Error: {error}</Text>
+        <Text color={colors.muted}>Press 'r' to retry</Text>
       </Box>
     );
   }

@@ -11,6 +11,8 @@
 import { ssh, sshOrFail } from "./ssh";
 import * as DB from "./db";
 import { log } from "./log";
+import { toSSHUrl } from "./github";
+import { setupProjectDomain } from "./caddy";
 
 // ============ Types ============
 
@@ -68,6 +70,9 @@ export async function deployCompose(
     progress("git", "Fetching repository...");
     const repoExists = await checkRepoExists(host, appPath);
 
+    // Convert to SSH URL for authentication
+    const sshUrl = toSSHUrl(project.repo_url);
+
     let commit: string;
     if (repoExists) {
       // Pull latest
@@ -80,10 +85,10 @@ export async function deployCompose(
     } else {
       // Remove directory if exists but is not a git repo
       await ssh(host, `rm -rf ${appPath}`);
-      // Clone
+      // Clone using SSH URL
       await sshOrFail(
         host,
-        `git clone --branch ${project.repo_branch} --depth 1 ${project.repo_url} ${appPath}`,
+        `git clone --branch ${project.repo_branch} --depth 1 ${sshUrl} ${appPath}`,
       );
       commit = await getCommitSha(host, appPath);
       progress("git", `Cloned at ${commit.substring(0, 7)}`);
@@ -129,6 +134,15 @@ export async function deployCompose(
 
     // Update project status
     DB.updateProjectStatus(projectId, "running", commit);
+
+    // Setup domain (Cloudflare DNS + Caddy) if configured
+    if (project.domain) {
+      progress("domain", "Setting up domain...");
+      const domainResult = await setupProjectDomain(projectId, progress);
+      if (!domainResult.success) {
+        progress("domain", `Warning: Domain setup failed: ${domainResult.error}`);
+      }
+    }
 
     progress("done", "Deployment complete!");
 

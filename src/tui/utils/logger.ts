@@ -1,10 +1,10 @@
 /**
- * File logger for TUI - writes to data/tui.log
+ * File logger for TUI - writes to logs/tui.log
  */
 import { appendFileSync, mkdirSync, existsSync, readFileSync } from "fs";
 import { join } from "path";
 
-const LOG_DIR = join(process.cwd(), "data");
+const LOG_DIR = join(process.cwd(), "logs");
 const LOG_FILE = join(LOG_DIR, "tui.log");
 
 // Ensure data directory exists

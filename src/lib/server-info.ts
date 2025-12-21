@@ -13,7 +13,7 @@ import { join } from "path";
 // Logging
 // ============================================================
 
-const LOG_DIR = join(process.cwd(), "data");
+const LOG_DIR = join(process.cwd(), "logs");
 const LOG_FILE = join(LOG_DIR, "tui.log");
 
 function logToFile(level: string, message: string, source?: string): void {

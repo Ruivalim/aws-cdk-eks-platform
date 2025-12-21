@@ -1,248 +1,212 @@
 # Ruilify
 
-Ferramenta para gerenciar infraestrutura de deploy: criar droplets no Digital Ocean, configurar servidores com Docker/Tailscale/Caddy, e fazer deploy de aplicacoes.
+Ferramenta de infraestrutura para deploy de aplicações via TUI. Controla servidores remotos via SSH/Tailscale.
 
-## Uso
+## Comandos
 
 ```bash
-# TUI (interface principal)
-bun run tui
-# ou
-cd src/tui && bun index.tsx
-
-# CLI legada
-bun src/cli.ts
+bun run tui          # Interface principal
+cd src/tui && bun index.tsx  # Alternativo
 ```
 
 ## Arquitetura
 
 ```
-Seu Mac (Controller)
-    |
-    ├── TUI (src/tui/) ou CLI (src/cli.ts)
-    ├── SQLite local (data/deployments.db)
-    |
-    └── Controla via SSH/Tailscale:
-        |
-        ├── Build Server - Docker + Registry + Git
-        ├── Gateway Server - Caddy (reverse proxy publico)
-        └── Worker Servers - Docker (apps)
+Mac (Controller) ─── SSH/Tailscale ───┬── Gateway Server (Caddy, IP público)
+       │                              ├── Worker Servers (Docker, apps)
+       │                              └── Build Server (Docker, Registry)
+       │
+       ├── TUI (src/tui/) - React/Ink
+       ├── SQLite (data/deployments.db)
+       └── Logs (logs/tui.log)
 ```
 
-## Estrutura do Projeto
+## Estrutura
 
 ```
 src/
-├── cli.ts              # CLI interativa (inquirer) - legada
-├── lib/
-│   ├── digitalocean.ts # API DO (droplets, SSH keys, billing)
-│   ├── cloudflare.ts   # API CF (DNS)
-│   ├── ssh.ts          # Comandos SSH
-│   ├── db.ts           # SQLite (projects, servers, deployments)
-│   ├── setup.ts        # Setup de servidores (Docker, Tailscale, Caddy)
-│   ├── server-info.ts  # Info detalhada do servidor via SSH
-│   ├── caddy.ts        # Gerenciamento do Caddy (reverse proxy)
-│   ├── deploy.ts       # Deploy blue-green
-│   ├── build.ts        # Build no build server
-│   ├── registry.ts     # Docker Registry privado
-│   ├── github.ts       # Clone, pull, deploy keys
-│   ├── services.ts     # Catalogo de servicos
-│   └── log.ts          # Logging colorido
+├── lib/                    # Core libraries
+│   ├── db.ts               # SQLite - servers, projects, deployments
+│   ├── ssh.ts              # SSH commands via Bun.spawn
+│   ├── setup.ts            # Server setup (Docker, Tailscale, Caddy)
+│   ├── compose.ts          # Deploy docker-compose projects
+│   ├── caddy.ts            # Caddy management + domain setup
+│   ├── github.ts           # GitHub API (SSH keys, repos)
+│   ├── cloudflare.ts       # Cloudflare API (DNS)
+│   ├── digitalocean.ts     # DO API (droplets, SSH keys)
+│   ├── server-info.ts      # Server details via SSH
+│   └── log.ts              # Console logging
+│
 └── tui/
-    ├── index.tsx       # Entry point
-    ├── App.tsx         # Layout principal
-    ├── components/     # Sidebar, List, ActionBar, Modal, Spinner
-    ├── screens/        # Servers, Projects, Deployments, Cloudflare, DigitalOcean, Logs, Settings
-    ├── hooks/          # useServers, useProjects, useDeployments
-    └── utils/          # theme, format, logger
+    ├── index.tsx           # Entry point
+    ├── App.tsx             # Layout (sidebar + content)
+    ├── components/         # UI components
+    │   ├── List.tsx        # Generic list with selection
+    │   ├── Modal.tsx       # Confirm dialogs (Y/N)
+    │   ├── ActionBar.tsx   # Bottom action hints
+    │   └── Spinner.tsx     # Loading indicator
+    ├── screens/            # Main screens
+    │   ├── Servers.tsx     # Server management + setup + GitHub keys
+    │   ├── Projects.tsx    # Project management + deploy
+    │   ├── Cloudflare.tsx  # DNS management
+    │   ├── DigitalOcean.tsx # Droplet management
+    │   └── Logs.tsx        # View logs
+    ├── hooks/              # React hooks for data
+    │   ├── useServers.ts
+    │   └── useProjects.ts
+    └── utils/
+        ├── logger.ts       # File logger (logs/tui.log)
+        └── theme.ts        # Colors
 
-scripts/
-├── setup-build-server.ts   # Configura build server
-├── setup-gateway-server.ts # Configura gateway server
-├── setup-target-server.ts  # Configura worker server
+scripts/                    # Setup scripts (used by TUI)
+├── setup-gateway-server.ts
+├── setup-build-server.ts
+└── setup-target-server.ts
 
-data/
-└── deployments.db      # SQLite local
-
-# Docker Composes por servico (templates)
-outline/
-glitchtip/
+# Docker compose templates
+cloudbeaver/
+postgres/
 n8n/
-plausible/
+outline/
 ...
 ```
 
-## TUI
-
-Interface principal em React/Ink. Telas:
-
-- **Servers**: Lista servidores, Setup (criar droplet DO ou SSH manual), Add, Edit, Delete, Detalhes
-- **Projects**: Lista projetos, Add, Edit, Delete, Deploy, Rollback
-- **Deployments**: Historico de deploys, View logs
-- **Cloudflare**: Zones e DNS records
-- **DigitalOcean**: Droplets, SSH Keys
-- **Logs**: View/filter/clear logs (data/tui.log)
-- **Settings**: Configuracoes
-
-### Atalhos
-
-| Tecla         | Acao                             |
-| ------------- | -------------------------------- |
-| Tab/Shift+Tab | Navegar entre sidebar e conteudo |
-| j/k ou setas  | Navegar na lista                 |
-| Enter         | Ver detalhes / Confirmar         |
-| a             | Add                              |
-| e             | Edit                             |
-| d             | Delete                           |
-| S             | Setup (em Servers)               |
-| Esc           | Voltar                           |
-| q             | Sair                             |
-
 ## Tipos de Servidor
 
-| Tipo        | Descricao             | Componentes                      |
-| ----------- | --------------------- | -------------------------------- |
-| **Gateway** | Reverse proxy publico | Caddy, Tailscale                 |
-| **Build**   | Builds e registry     | Docker, Registry, Git, Tailscale |
-| **Worker**  | Roda aplicacoes       | Docker, Tailscale                |
+| Tipo | Setup Instala | Função |
+|------|---------------|--------|
+| Gateway | Docker, Tailscale, Caddy | Reverse proxy, SSL, IP público |
+| Worker | Docker, Tailscale | Roda containers, IP privado |
+| Build | Docker, Registry, Git, Tailscale | Build images (opcional) |
 
-## Deploy Pipeline
+## Deploy Flow
 
-### Compose Only (postgres, redis, apps pre-built)
+### Compose Deploy (src/lib/compose.ts)
 
-1. **Worker Server**: git clone → write .env → docker compose up
-2. **Gateway Server**: Atualiza Caddy (se tiver domain)
+```
+1. SSH para worker server
+2. mkdir /opt/ruilify/apps/{project}
+3. git clone (SSH URL) ou git pull
+4. Escreve .env com variáveis
+5. Copia docker-compose.yml do repo
+6. docker compose up -d
+7. Verifica containers running
+8. Se tem domain:
+   - Cloudflare: cria/atualiza A record → gateway IP
+   - Caddy: atualiza Caddyfile no gateway
+   - Reload Caddy
+```
 
-### Compose + Build (apps custom)
+### Domain Setup (src/lib/caddy.ts)
 
-1. **Build Server**: git clone → build.sh → docker build → push registry
-2. **Worker Server**: git clone → update image ref → docker compose up
-3. **Gateway Server**: Atualiza Caddy
+```typescript
+setupProjectDomain(projectId)
+  1. Pega project do DB
+  2. Pega gateway server do DB
+  3. Cloudflare: cria A record (domain → gateway public IP)
+  4. Caddy: syncRoutes() - gera Caddyfile de todos os projects
+  5. SSH gateway: escreve /etc/caddy/Caddyfile
+  6. SSH gateway: systemctl reload caddy
+```
+
+## GitHub SSH Keys
+
+```typescript
+// Conectar servidor ao GitHub
+connectServerToGitHub(host, serverName)
+  1. Gera SSH key no servidor (ssh-keygen)
+  2. Remove key antiga do GitHub se existir
+  3. Adiciona nova key via GitHub API
+  4. Testa conexão (ssh -T git@github.com)
+
+// Key naming: ruilify-{server-name}
+```
+
+## Delete Server Flow
+
+```typescript
+executeDelete()
+  1. Delete GitHub SSH key (se marcado)
+  2. Delete DNS records no Cloudflare (se marcado)
+  3. Delete todos os projects do servidor
+  4. Delete droplet no DO (se marcado)
+  5. Delete server do DB local
+```
+
+## Database Schema (src/lib/db.ts)
+
+```typescript
+Server {
+  id, name, tailscale_ip, public_ip, role, status
+}
+
+Project {
+  id, name, repo_url, repo_branch, compose_path,
+  target_server, domain, port, env_vars, status
+}
+
+Deployment {
+  id, project_id, commit, status, started_at, finished_at
+}
+```
+
+## Bun
+
+Use Bun APIs, não Node.js:
+
+```typescript
+// SSH
+Bun.spawn(["ssh", host, command])
+
+// SQLite
+import { Database } from "bun:sqlite"
+
+// File I/O
+Bun.file(path).text()
+Bun.write(path, content)
+
+// HTTP
+fetch() // já builtin
+
+// .env
+process.env.VAR // Bun carrega .env automaticamente
+```
 
 ## Worker Server Structure
 
 ```
 /opt/ruilify/
 ├── apps/
-│   └── {projeto}/
+│   └── {project}/
 │       ├── docker-compose.yml
 │       ├── .env
-│       └── data/           # volumes
-└── backup-service/
-    ├── docker-compose.yml
-    ├── config.yml
-    └── logs/
+│       └── data/  # volumes
 ```
 
-## Project Schema
+## Caddyfile (Gateway)
 
-```typescript
-interface Project {
-  id: string;
-  name: string;
+```caddyfile
+{
+  email admin@example.com
+}
 
-  // Git
-  repo_url: string;
-  branch: string;
-  compose_path: string; // path to docker-compose.yml in repo
+db.ruivalim.com.br {
+  reverse_proxy 100.114.58.48:8978
+}
 
-  // Build (optional)
-  has_build: boolean;
-  build_script: string; // path to build.sh
-  build_service: string; // which service gets built image
-
-  // Deploy
-  worker_server_id: string;
-
-  // Routing
-  domain: string | null;
-  port: number;
-
-  // Port mappings (override defaults)
-  port_mappings: Record<string, { internal: number; external: number }>;
-
-  // Config
-  env_vars: Record<string, string>;
-
-  // State
-  status: "pending" | "deploying" | "running" | "failed" | "stopped";
-  current_commit: string | null;
+api.example.com {
+  reverse_proxy 100.114.58.48:3000
 }
 ```
 
-## src/lib/
+## Key Files
 
-### `digitalocean.ts`
-
-- Listar/criar/deletar droplets
-- Gerenciar SSH keys
-- Billing e account info
-
-### `cloudflare.ts`
-
-- Listar zones (dominios)
-- CRUD de DNS records
-
-### `ssh.ts`
-
-- `ssh(host, command)` - executa comando remoto
-- `testConnection(host)` - testa conectividade
-- `getServerInfo(host)` - info basica do servidor
-
-### `db.ts`
-
-SQLite local:
-
-- **Servers**: nome, IP Tailscale, IP publico, role
-- **Projects**: nome, repo, branch, server, domain, env vars
-- **Deployments**: historico, status, logs
-
-### `setup.ts`
-
-Setup de servidores via SSH:
-
-- `setupGatewayServer()` - Docker, Tailscale, Caddy
-- `setupBuildServer()` - Docker, Registry, Git
-- `setupWorkerServer()` - Docker, Tailscale
-
-### `server-info.ts`
-
-Info detalhada do servidor:
-
-- `getServerDetails()` - hostname, OS, memory, disk, Docker, Tailscale, Caddy
-- `checkUpdates()` - apt updates disponiveis
-- `applyUpdates()` - instalar updates
-- `checkConnectivity()` - teste rapido de SSH
-
-### `caddy.ts`
-
-Gerenciamento do Caddy:
-
-- Adicionar/remover rotas
-- Reload config
-
-### `deploy.ts`
-
-Deploy blue-green:
-
-- `fullDeploy()` - build + deploy
-- `runDeploy()` - apenas deploy
-- `rollback()` - voltar versao
-
----
-
-# Bun
-
-Default to using Bun instead of Node.js.
-
-- Use `bun <file>` instead of `node <file>` or `ts-node <file>`
-- Use `bun test` instead of `jest` or `vitest`
-- Use `bun install` instead of `npm install`
-- Bun automatically loads .env, so don't use dotenv.
-
-## APIs
-
-- `Bun.serve()` for HTTP servers. Don't use `express`.
-- `bun:sqlite` for SQLite. Don't use `better-sqlite3`.
-- `Bun.spawn()` for subprocesses. Don't use `execa`.
-- `Bun.file()` for file I/O. Prefer over `node:fs`.
+| File | Purpose |
+|------|---------|
+| `src/lib/compose.ts` | Deploy docker-compose projects |
+| `src/lib/caddy.ts` | Caddy + Cloudflare domain setup |
+| `src/lib/github.ts` | GitHub API (SSH keys, repos) |
+| `src/lib/setup.ts` | Server setup scripts |
+| `src/tui/screens/Servers.tsx` | Server management UI |
+| `src/tui/screens/Projects.tsx` | Project management UI |
+| `docs/tui-updates.md` | Pending features |

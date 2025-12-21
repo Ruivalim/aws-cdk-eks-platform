@@ -11,8 +11,11 @@ coverage
 *.lcov
 
 # logs
-logs
-_.log
+logs/
+*.log
+
+# data (sqlite db)
+data/
 report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # dotenv environment variable files

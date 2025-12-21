@@ -1,31 +1,40 @@
-# TUI Updates
+# TUI Updates - Pending Features
+
+## Dashboard - Resumo Inicial
+
+Ao abrir o TUI, mostrar resumo na tela inicial:
+
+```
+Ruilify Dashboard
+
+Servers:    2 online / 2 total
+Projects:   5 deployed / 6 total
+Last deploy: cloudbeaver (2h ago)
+
+Alerts:
+  ⚠ app-server-2 not responding
+  ⚠ SSL expiring in 7 days: api.example.com
+```
+
+---
+
+## Server Status - Health Check Melhorado
+
+Mostrar status detalhado de todos os servers:
+
+```
+Servers
+
+● gateway-server    Online   Docker ✓  Caddy ✓   CPU 12%  Mem 45%  Disk 23%
+● app-server-1      Online   Docker ✓  GitHub ✓  CPU 8%   Mem 62%  Disk 31%
+○ app-server-2      Offline  Last seen: 2h ago
+```
+
+---
 
 ## Server Details - Feature Installation
 
 When viewing server details, show installed features and allow installing new ones.
-
-### Current Server Details
-
-```
-Servers → worker-1 (Enter)
-
-worker-1 - Worker Server
-
-Network                         Services
-  Tailscale IP: 100.83.119.41     ● Docker 24.0.7 (5 containers)
-  Public IP: 164.90.x.x           ● Tailscale 1.56.0
-  Magic DNS: worker-1.tail...     ○ Backup Service (not installed)
-
-System                          Resources
-  Hostname: worker-1              Memory: 1.2G/4G [████████░░░░] 30%
-  OS: Ubuntu 24.04                Disk: 12G/80G  [██░░░░░░░░░░] 15%
-  Kernel: 6.5.0
-  Uptime: 5 days
-
-[r] Refresh  [u] Check updates  [U] Apply updates  [f] Features  [Esc] Back
-```
-
-### Features Screen
 
 ```
 Servers → worker-1 → Features
@@ -42,20 +51,21 @@ Available Features:
 [Enter] Install selected    [Esc] Back
 ```
 
-### Installing Feature
+When viewing server details, show installed features and allow installing new ones.
 
 ```
-Servers → worker-1 → Features → Backup Service
+Servers → worker-1 → Features
 
-Installing Backup Service...
+Installed Features:
+  ● Docker           24.0.7    Core container runtime
+  ● Tailscale        1.56.0    Mesh VPN
 
-  ✓ Creating directory /opt/ruilify/backup-service
-  ✓ Writing docker-compose.yml
-  → Pulling ruilify/backup:latest...
-  ○ Starting container
-  ○ Verifying health
+Available Features:
+  ○ Backup Service   -         Automated backups to S3
+  ○ Log Collector    -         Centralized logging
+  ○ Metrics Agent    -         Prometheus metrics
 
-[Logs shown in real-time]
+[Enter] Install selected    [Esc] Back
 ```
 
 ---
@@ -87,81 +97,11 @@ Port   Project      Service         Container
 
 ### Port Override in Project
 
-When adding/editing a project:
-
-```
-Projects → Add Project
-
-...
-
-6. Configure Ports
-
-Detected services and ports:
-  app      3000 → 3000 (external)
-  db       5432 → 5432 (external)
-
-⚠️  Port 5432 is already in use by: outline/db
-
-Override external ports:
-  app: [3000]
-  db:  [5433]    ◄── Changed to avoid conflict
-
-[Enter] Continue    [Esc] Back
-```
-
-### Project Schema Update
-
-```typescript
-interface Project {
-  // ... existing fields
-
-  // Port mappings
-  port_mappings: {
-    [service: string]: {
-      internal: number; // Port inside container
-      external: number; // Port exposed on host
-    };
-  };
-
-  // Example:
-  // port_mappings: {
-  //   "app": { internal: 3000, external: 3000 },
-  //   "db": { internal: 5432, external: 5433 }
-  // }
-}
-```
-
-### Caddy Integration
-
-When configuring Caddy, use the external port:
-
-```
-outline.example.com {
-  reverse_proxy 100.83.119.41:3000  # Uses external port from mapping
-}
-```
-
-### Auto Port Assignment
-
-When port conflict detected:
-
-```typescript
-function findAvailablePort(basePort: number, usedPorts: Set<number>): number {
-  let port = basePort;
-  while (usedPorts.has(port)) {
-    port++;
-  }
-  return port;
-}
-
-// Example: 5432 in use → suggest 5433
-```
+When adding/editing a project, detect and resolve port conflicts.
 
 ---
 
-## Projects - Deploy Actions
-
-Enhanced project actions:
+## Projects - Enhanced Actions
 
 ```
 Projects → outline (Enter)
@@ -175,68 +115,7 @@ Containers:
   ● outline-app-1    Up 2 hours    3000:3000
   ● outline-db-1     Up 2 hours    5432:5432
 
-Environment Variables: 12 configured
-Backup: ● Enabled (last: 2h ago)
-
-[D] Deploy/Update  [R] Restart  [s] Stop  [l] Logs  [e] Edit  [b] Backups
-```
-
-### Deploy Action
-
-```
-Projects → outline → Deploy
-
-Deploying outline...
-
-Source: github.com/outline/outline
-Branch: main
-Worker: worker-1 (100.83.119.41)
-
-[1/5] Checking for updates...
-      Current: abc1234
-      Latest:  def5678
-
-[2/5] Pulling latest code...
-      ✓ Pulled def5678
-
-[3/5] Building... (if has_build)
-      → Running build.sh
-      → Building Docker image
-      → Pushing to registry
-
-[4/5] Deploying containers...
-      ✓ Pulled images
-      ✓ Started containers
-      ✓ Health check passed
-
-[5/5] Updating gateway...
-      ✓ Caddy reloaded
-
-✓ Deployed successfully!
-
-Commit: def5678
-URL: https://wiki.example.com
-
-[Enter] Done    [l] View logs
-```
-
-### Restart Action
-
-For applying new env vars without full redeploy:
-
-```
-Projects → outline → Restart
-
-Restarting outline...
-
-  ✓ Stopping containers
-  ✓ Writing new .env file
-  ✓ Starting containers
-  ✓ Health check passed
-
-✓ Restarted successfully!
-
-[Enter] Done
+[D] Deploy/Update  [R] Restart  [s] Stop  [l] Logs  [e] Edit
 ```
 
 ---
@@ -252,56 +131,224 @@ Backup Storage:
   Bucket:     ruilify-backups
   Status:     ● Connected
 
-  [c] Configure S3
-
 ACME Email:
   Email: admin@example.com
-  (Used for Let's Encrypt certificates)
-
-  [e] Edit email
 
 Default Ports:
   Base port for new projects: 3000
   Port range: 3000-4000
-
-  [p] Edit ports
 ```
 
 ---
 
-## Global Port View
-
-Optional: global view of all ports across all workers.
+## Projects - Container Logs em Tempo Real
 
 ```
-Ports (all servers)
+Projects → cloudbeaver → Logs
 
-worker-1 (100.83.119.41):
-  3000  outline/app
-  5432  outline/db
-  5678  n8n/app
-  6379  redis/redis
+Showing logs for: cloudbeaver (cloudbeaver-1)
 
-worker-2 (100.83.120.15):
-  3000  my-app/app
-  5432  postgres/db
+[2025-12-20 15:32:01] Starting CloudBeaver...
+[2025-12-20 15:32:02] Database connection established
+[2025-12-20 15:32:03] Server listening on port 8978
+[2025-12-20 15:32:15] New connection from 100.114.58.48
 
-gateway (100.83.119.40):
-  80    caddy (HTTP)
-  443   caddy (HTTPS)
-
-[Enter] View details    [Esc] Back
+[Ctrl+C] Stop  [f] Filter  [c] Clear  [Esc] Back
 ```
 
 ---
 
-## Implementation Priority
+## Projects - Health Check Status
 
-1. **Port tracking in DB** - Track used ports per server
-2. **Port conflict detection** - Warn when adding project
-3. **Port override UI** - Allow changing external ports
-4. **Features screen** - Install backup service, etc
-5. **Ports overview screen** - See all ports in use
+```
+Projects → Health Status
+
+Health Check Results:
+
+✓ db.ruivalim.com.br      200 OK         45ms
+✓ api.example.com         200 OK         120ms
+⚠ app.example.com         200 OK         2.3s (slow)
+✗ staging.example.com     502 Bad Gateway
+○ internal-service        No domain configured
+
+[r] Refresh  [Enter] View details  [Esc] Back
+```
+
+---
+
+## Gateway - SSL/Certificates Status
+
+```
+Gateway → SSL Status
+
+Domain                    Status    Expires      Issuer
+─────────────────────────────────────────────────────────
+db.ruivalim.com.br        ● Valid   2026-03-20   Let's Encrypt
+api.example.com           ● Valid   2026-03-15   Let's Encrypt
+staging.example.com       ⚠ Soon    2025-12-27   Let's Encrypt
+old.example.com           ✗ Expired 2025-12-01   Let's Encrypt
+
+[r] Refresh  [R] Force renew  [Esc] Back
+```
+
+---
+
+## Settings - Backup/Export Config
+
+```
+Settings → Export/Import
+
+Export Configuration:
+  Exports servers, projects, and settings to JSON file.
+  Note: Sensitive env vars are encrypted.
+
+  [e] Export to ~/ruilify-backup.json
+
+Import Configuration:
+  Import from a previously exported backup.
+
+  [i] Import from file
+
+Last export: 2025-12-15 10:30:00
+```
+
+---
+
+## Settings - Notifications (Webhooks)
+
+```
+Settings → Notifications
+
+Discord Webhook:
+  URL: https://discord.com/api/webhooks/...
+  Status: ● Connected
+  Events: Deploy success, Deploy failed
+
+Slack Webhook:
+  URL: (not configured)
+
+Per-project overrides:
+  cloudbeaver: Discord only
+  api-server: Slack + Discord
+
+[d] Configure Discord  [s] Configure Slack  [Esc] Back
+```
+
+---
+
+## Maintenance - Cleanup
+
+```
+Maintenance → Cleanup
+
+Cleanup Tasks:
+
+[ ] Remove unused Docker images
+    Found: 12 images (2.3 GB)
+
+[ ] Remove stopped containers
+    Found: 5 containers
+
+[ ] Clean old build artifacts
+    Found: 8 builds (1.1 GB)
+
+[ ] Prune Docker system
+    Estimated space: 3.4 GB
+
+[Space] Toggle  [Enter] Run cleanup  [Esc] Cancel
+```
+
+---
+
+## Projects - Multi-ambiente (Staging/Prod)
+
+```
+Projects → api-server → Environments
+
+Environments:
+
+● Production
+  Domain: api.example.com
+  Server: app-server-1
+  Branch: main
+  Status: Running (commit abc123)
+
+○ Staging
+  Domain: staging-api.example.com
+  Server: app-server-2
+  Branch: develop
+  Status: Running (commit def456)
+
+[a] Add environment  [d] Deploy  [Esc] Back
+```
+
+---
+
+## Tailscale - Gerenciamento via API
+
+Usar a Tailscale API para gerenciar devices na rede.
+
+### Configuração
+
+```
+# .env
+TAILSCALE_API_KEY=tskey-api-xxxxxxxx
+TAILSCALE_TAILNET=your-tailnet.ts.net
+```
+
+### Listar Devices
+
+```
+Servers → Tailscale Devices
+
+Devices na rede Tailscale:
+
+● gateway-server     100.83.119.41    Online    Linux    2h ago
+● app-server-1       100.114.58.48    Online    Linux    5m ago
+○ old-server         100.99.88.77     Offline   Linux    5d ago
+○ test-machine       100.100.100.1    Offline   macOS    30d ago
+
+[d] Remove device  [r] Refresh  [Esc] Back
+```
+
+### Auto-remove ao deletar servidor
+
+Quando deletar um servidor no Ruilify, opção de também remover do Tailscale:
+
+```
+Delete Server: app-server-1
+
+Select what to delete (Space to toggle):
+
+▸ [x] Delete droplet from Digital Ocean
+  [x] Delete DNS records from Cloudflare
+  [x] Delete GitHub SSH key
+  [x] Remove from Tailscale network    <-- NOVO
+
+[Space] Toggle  [Enter] Delete  [Esc] Cancel
+```
+
+### Sincronizar Servers com Tailscale
+
+Detectar devices no Tailscale que não estão registrados no Ruilify:
+
+```
+Servers → Sync with Tailscale
+
+Found 2 devices not registered in Ruilify:
+
+○ new-server-1    100.88.77.66    Online
+○ test-vm         100.55.44.33    Offline
+
+[a] Add to Ruilify  [i] Ignore  [Esc] Back
+```
+
+### API Endpoints usados
+
+```typescript
+// GET https://api.tailscale.com/api/v2/tailnet/{tailnet}/devices
+// DELETE https://api.tailscale.com/api/v2/device/{deviceId}
+```
 
 ---
 

@@ -9,6 +9,7 @@
 
 import { ssh, sshOrFail } from "./ssh";
 import * as DB from "./db";
+import * as Cloudflare from "./cloudflare";
 
 // Default ACME email for Let's Encrypt certificates
 const DEFAULT_ACME_EMAIL = "ruivalim@pm.me";
@@ -26,14 +27,14 @@ const CADDY_CONFIG_PATH = "/etc/caddy/Caddyfile";
 const CADDY_DATA_PATH = "/data/caddy";
 
 /**
- * Get the gateway server from environment or database
+ * Get the gateway server SSH host from environment or database
  */
 export function getGatewayServer(): string {
   const envHost = process.env.GATEWAY_SERVER_HOST;
   if (envHost) return envHost;
 
   const server = DB.getGatewayServer();
-  if (server) return server.tailscale_ip;
+  if (server) return `root@${server.tailscale_ip}`;
 
   throw new Error(
     "No gateway server configured. Set GATEWAY_SERVER_HOST or run setup-gateway-server.ts",
@@ -91,14 +92,21 @@ export function getRoutesFromProjects(): CaddyRoute[] {
   const routes: CaddyRoute[] = [];
 
   for (const project of projects) {
-    if (!project.domain || !project.current_slot) {
-      continue; // Skip projects without domain or not deployed
+    // Skip projects without domain or not running
+    if (!project.domain || project.status !== "running") {
+      continue;
     }
 
-    const port = project.current_slot === "blue" ? 3000 : 3001;
+    // Get the worker server's Tailscale IP
+    const server = DB.getServer(project.target_server);
+    if (!server) continue;
+
+    // Use project port (for compose deploys) or blue/green slot
+    const port = project.port || (project.current_slot === "blue" ? 3000 : 3001);
+
     routes.push({
       domain: project.domain,
-      upstream: `${project.target_server}:${port}`,
+      upstream: `${server.tailscale_ip}:${port}`,
     });
   }
 
@@ -311,6 +319,163 @@ export async function testRoute(
       accessible: false,
       statusCode: 0,
       responseTime: Date.now() - start,
+    };
+  }
+}
+
+// ============ Domain Setup (Cloudflare + Caddy) ============
+
+export interface SetupDomainResult {
+  success: boolean;
+  dns?: { created: boolean; recordId: string };
+  caddy?: { synced: boolean };
+  error?: string;
+}
+
+/**
+ * Extract the root zone from a domain
+ * e.g., "cloudbeaver.ruivalim.com.br" -> "ruivalim.com.br"
+ */
+function extractZone(domain: string): string {
+  const parts = domain.split(".");
+  // Handle .com.br, .co.uk style TLDs
+  if (parts.length >= 3 && parts[parts.length - 2].length <= 3) {
+    return parts.slice(-3).join(".");
+  }
+  return parts.slice(-2).join(".");
+}
+
+/**
+ * Setup domain for a project:
+ * 1. Create DNS A record in Cloudflare pointing to gateway public IP
+ * 2. Update Caddy routes on gateway
+ */
+export async function setupProjectDomain(
+  projectId: string,
+  onProgress?: (step: string, message: string) => void,
+): Promise<SetupDomainResult> {
+  const progress = onProgress || (() => {});
+
+  try {
+    const project = DB.getProject(projectId);
+    if (!project) {
+      throw new Error(`Project ${projectId} not found`);
+    }
+
+    if (!project.domain) {
+      throw new Error("Project has no domain configured");
+    }
+
+    // Get gateway server for public IP
+    const gatewayServer = DB.getGatewayServer();
+    if (!gatewayServer || !gatewayServer.public_ip) {
+      throw new Error("Gateway server not configured or has no public IP");
+    }
+
+    const result: SetupDomainResult = { success: true };
+
+    // 1. Setup DNS in Cloudflare
+    if (Cloudflare.hasCloudflareConfig()) {
+      progress("dns", `Setting up DNS for ${project.domain}...`);
+
+      const zoneName = extractZone(project.domain);
+      const zone = await Cloudflare.getZoneByName(zoneName);
+
+      if (!zone) {
+        throw new Error(`Zone ${zoneName} not found in Cloudflare`);
+      }
+
+      // Check if record already exists
+      const existingRecords = await Cloudflare.listDnsRecords(zone.id, "A");
+      const existing = existingRecords.find((r) => r.name === project.domain);
+
+      if (existing) {
+        // Update existing record
+        await Cloudflare.updateDnsRecord(zone.id, existing.id, {
+          content: gatewayServer.public_ip,
+        });
+        result.dns = { created: false, recordId: existing.id };
+        progress("dns", `Updated DNS record (${existing.id})`);
+      } else {
+        // Create new record
+        const record = await Cloudflare.createARecord(
+          zone.id,
+          project.domain,
+          gatewayServer.public_ip,
+          true, // proxied through Cloudflare
+        );
+        result.dns = { created: true, recordId: record.id };
+        progress("dns", `Created DNS record (${record.id})`);
+      }
+    } else {
+      progress("dns", "Cloudflare not configured, skipping DNS setup");
+    }
+
+    // 2. Sync Caddy routes
+    progress("caddy", "Syncing Caddy routes...");
+    const caddyResult = await syncRoutes();
+
+    if (!caddyResult.success) {
+      throw new Error(`Caddy sync failed: ${caddyResult.error}`);
+    }
+
+    result.caddy = { synced: true };
+    progress("caddy", `Caddy synced (${caddyResult.routes} routes)`);
+
+    return result;
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Remove domain setup for a project:
+ * 1. Remove DNS record from Cloudflare
+ * 2. Update Caddy routes
+ */
+export async function removeProjectDomain(
+  projectId: string,
+  onProgress?: (step: string, message: string) => void,
+): Promise<{ success: boolean; error?: string }> {
+  const progress = onProgress || (() => {});
+
+  try {
+    const project = DB.getProject(projectId);
+    if (!project || !project.domain) {
+      return { success: true }; // Nothing to remove
+    }
+
+    // 1. Remove DNS record
+    if (Cloudflare.hasCloudflareConfig()) {
+      progress("dns", `Removing DNS for ${project.domain}...`);
+
+      const zoneName = extractZone(project.domain);
+      const zone = await Cloudflare.getZoneByName(zoneName);
+
+      if (zone) {
+        const records = await Cloudflare.listDnsRecords(zone.id, "A");
+        const existing = records.find((r) => r.name === project.domain);
+
+        if (existing) {
+          await Cloudflare.deleteDnsRecord(zone.id, existing.id);
+          progress("dns", "DNS record removed");
+        }
+      }
+    }
+
+    // 2. Sync Caddy routes (will exclude this project)
+    progress("caddy", "Syncing Caddy routes...");
+    await syncRoutes();
+    progress("caddy", "Caddy synced");
+
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
     };
   }
 }

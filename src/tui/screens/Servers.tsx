@@ -17,6 +17,9 @@ import * as Setup from "../../lib/setup";
 import * as DO from "../../lib/digitalocean";
 import * as ServerInfo from "../../lib/server-info";
 import type { ServerDetails } from "../../lib/server-info";
+import * as GitHub from "../../lib/github";
+import * as Cloudflare from "../../lib/cloudflare";
+import * as DB from "../../lib/db";
 import { logger } from "../utils/logger";
 
 type Mode =
@@ -24,6 +27,7 @@ type Mode =
   | "add"
   | "edit"
   | "delete"
+  | "delete-running"
   | "details"
   | "details-updating"
   | "setup"
@@ -33,7 +37,10 @@ type Mode =
   | "setup-host"
   | "setup-running"
   | "setup-tailscale-auth"
-  | "setup-done";
+  | "setup-done"
+  | "setup-github-connect"
+  | "github-key"
+  | "github-key-action";
 
 type SetupServerType = "gateway" | "build" | "worker";
 
@@ -117,6 +124,19 @@ export default function Servers({ focused }: ServersProps) {
   );
   const [loadingDetails, setLoadingDetails] = useState(false);
   const [detailsAction, setDetailsAction] = useState<string>("");
+
+  // GitHub SSH key state
+  const [githubConnected, setGithubConnected] = useState<boolean | null>(null);
+  const [githubKeyAction, setGithubKeyAction] = useState<string>("");
+
+  // Delete server state
+  const [deleteOptions, setDeleteOptions] = useState({
+    deleteDroplet: false,
+    deleteDns: true, // default to true for cleanup
+    deleteGithubKey: true,
+  });
+  const [deleteProgress, setDeleteProgress] = useState<string>("");
+  const [deleteSelectedOption, setDeleteSelectedOption] = useState(0);
 
   // Check status on mount
   useEffect(() => {
@@ -293,12 +313,17 @@ export default function Servers({ focused }: ServersProps) {
         setMode("details");
         setLoadingDetails(true);
         setServerDetails(null);
-        ServerInfo.getServerDetails(selectedServer.tailscale_ip).then(
-          (details) => {
-            setServerDetails(details);
-            setLoadingDetails(false);
-          },
-        );
+        setGithubConnected(null);
+        const host = `root@${selectedServer.tailscale_ip}`;
+        // Load server details and GitHub status in parallel
+        Promise.all([
+          ServerInfo.getServerDetails(selectedServer.tailscale_ip),
+          GitHub.isServerConnectedToGitHub(host),
+        ]).then(([details, connected]) => {
+          setServerDetails(details);
+          setGithubConnected(connected);
+          setLoadingDetails(false);
+        });
       }
     },
     { isActive: focused && mode === "list" },
@@ -308,19 +333,23 @@ export default function Servers({ focused }: ServersProps) {
   useInput(
     (input) => {
       if (!selectedServer) return;
-      const host = selectedServer.tailscale_ip;
+      const host = `root@${selectedServer.tailscale_ip}`;
 
       if (input === "r") {
         // Refresh details
         setLoadingDetails(true);
-        ServerInfo.getServerDetails(host).then((details) => {
+        Promise.all([
+          ServerInfo.getServerDetails(selectedServer.tailscale_ip),
+          GitHub.isServerConnectedToGitHub(host),
+        ]).then(([details, connected]) => {
           setServerDetails(details);
+          setGithubConnected(connected);
           setLoadingDetails(false);
         });
       } else if (input === "u") {
         // Check for updates
         setDetailsAction("Checking for updates...");
-        ServerInfo.checkUpdates(host).then((updates) => {
+        ServerInfo.checkUpdates(selectedServer.tailscale_ip).then((updates) => {
           if (updates) {
             setServerDetails((prev) => (prev ? { ...prev, updates } : null));
           }
@@ -330,16 +359,19 @@ export default function Servers({ focused }: ServersProps) {
         // Apply updates
         setMode("details-updating");
         setDetailsAction("Applying updates...");
-        ServerInfo.applyUpdates(host, (msg) => setDetailsAction(msg)).then(
+        ServerInfo.applyUpdates(selectedServer.tailscale_ip, (msg) => setDetailsAction(msg)).then(
           () => {
             setDetailsAction("");
             setMode("details");
             // Refresh details after update
-            ServerInfo.getServerDetails(host).then((details) => {
+            ServerInfo.getServerDetails(selectedServer.tailscale_ip).then((details) => {
               setServerDetails(details);
             });
           },
         );
+      } else if (input === "G") {
+        // GitHub key management
+        setMode("github-key");
       }
     },
     { isActive: mode === "details" && !loadingDetails },
@@ -386,6 +418,207 @@ export default function Servers({ focused }: ServersProps) {
     },
     { isActive: mode === "setup-tailscale-auth" },
   );
+
+  // Handle input in GitHub key mode
+  useInput(
+    (input) => {
+      if (!selectedServer) return;
+      const host = `root@${selectedServer.tailscale_ip}`;
+
+      if (input === "c" || input === "C") {
+        // Connect to GitHub (generate key and register)
+        setMode("github-key-action");
+        setGithubKeyAction("Connecting to GitHub...");
+        GitHub.connectServerToGitHub(host, selectedServer.name).then((result) => {
+          if (result.success) {
+            setGithubConnected(true);
+            setGithubKeyAction("");
+            logger.success(`Connected ${selectedServer.name} to GitHub`, "servers");
+          } else {
+            setGithubKeyAction(`Error: ${result.message}`);
+            logger.error(`Failed to connect to GitHub: ${result.message}`, "servers");
+          }
+          setMode("github-key");
+        });
+      } else if (input === "d" || input === "D") {
+        // Delete GitHub key
+        setMode("github-key-action");
+        setGithubKeyAction("Deleting GitHub key...");
+        const keyTitle = `ruilify-${selectedServer.name}`;
+        GitHub.findGitHubSSHKeyByTitle(keyTitle).then(async (key) => {
+          if (key) {
+            await GitHub.deleteGitHubSSHKey(key.id);
+            setGithubConnected(false);
+            setGithubKeyAction("");
+            logger.success(`Deleted GitHub key for ${selectedServer.name}`, "servers");
+          } else {
+            setGithubKeyAction("No GitHub key found");
+          }
+          setMode("github-key");
+        }).catch((err) => {
+          setGithubKeyAction(`Error: ${err.message}`);
+          setMode("github-key");
+        });
+      } else if (input === "t" || input === "T") {
+        // Test connection
+        setGithubKeyAction("Testing connection...");
+        GitHub.isServerConnectedToGitHub(host).then((connected) => {
+          setGithubConnected(connected);
+          setGithubKeyAction(connected ? "Connection OK!" : "Not connected");
+          setTimeout(() => setGithubKeyAction(""), 2000);
+        });
+      }
+    },
+    { isActive: mode === "github-key" },
+  );
+
+  // Handle input in setup-done mode (for GitHub connect option)
+  useInput(
+    (input) => {
+      if (!setupState.result?.success) return;
+      if (setupState.serverType === "gateway") return;
+
+      if (input === "g" || input === "G") {
+        // Connect to GitHub
+        const tailscaleIp = setupState.result.tailscaleIp;
+        if (!tailscaleIp) return;
+
+        const host = `root@${tailscaleIp}`;
+        const serverName = setupState.result.hostname || setupState.dropletName || "server";
+
+        setMode("setup-github-connect");
+        setGithubKeyAction("Connecting to GitHub...");
+
+        GitHub.connectServerToGitHub(host, serverName).then((result) => {
+          if (result.success) {
+            setGithubConnected(true);
+            setGithubKeyAction("Connected to GitHub!");
+            logger.success(`Connected ${serverName} to GitHub`, "servers");
+          } else {
+            setGithubKeyAction(`Error: ${result.message}`);
+            logger.error(`Failed to connect to GitHub: ${result.message}`, "servers");
+          }
+        });
+      }
+    },
+    { isActive: mode === "setup-done" },
+  );
+
+  // Handle input in delete mode
+  useInput(
+    (input, key) => {
+      if (!selectedServer) return;
+
+      // Build options list dynamically (same as in render)
+      const optionsList: Array<keyof typeof deleteOptions> = [];
+      if (selectedServer.public_ip) optionsList.push("deleteDroplet");
+      optionsList.push("deleteDns", "deleteGithubKey");
+
+      if (input === "j" || key.downArrow) {
+        setDeleteSelectedOption((i) => Math.min(i + 1, optionsList.length - 1));
+      } else if (input === "k" || key.upArrow) {
+        setDeleteSelectedOption((i) => Math.max(i - 1, 0));
+      } else if (input === " ") {
+        // Toggle option
+        const optionKey = optionsList[deleteSelectedOption];
+        setDeleteOptions((prev) => ({ ...prev, [optionKey]: !prev[optionKey] }));
+      } else if (key.return) {
+        // Execute delete
+        executeDelete();
+      }
+    },
+    { isActive: mode === "delete" },
+  );
+
+  // Execute delete with all options
+  const executeDelete = async () => {
+    if (!selectedServer) return;
+
+    setMode("delete-running");
+    const serverName = selectedServer.name;
+
+    try {
+      // 1. Delete GitHub key
+      if (deleteOptions.deleteGithubKey) {
+        setDeleteProgress("Deleting GitHub SSH key...");
+        const keyTitle = `ruilify-${serverName}`;
+        try {
+          const key = await GitHub.findGitHubSSHKeyByTitle(keyTitle);
+          if (key) {
+            await GitHub.deleteGitHubSSHKey(key.id);
+            logger.info(`Deleted GitHub key: ${keyTitle}`, "servers");
+          }
+        } catch {
+          // Ignore
+        }
+      }
+
+      // 2. Delete DNS records and projects on this server
+      const projects = DB.listProjects().filter((p) => p.target_server === selectedServer.id);
+
+      if (deleteOptions.deleteDns) {
+        setDeleteProgress("Deleting DNS records...");
+        for (const project of projects) {
+          if (!project.domain) continue;
+          try {
+            // Extract zone from domain
+            const parts = project.domain.split(".");
+            const zoneName = parts.length >= 3 && parts[parts.length - 2].length <= 3
+              ? parts.slice(-3).join(".")
+              : parts.slice(-2).join(".");
+
+            const zone = await Cloudflare.getZoneByName(zoneName);
+            if (zone) {
+              const records = await Cloudflare.listDnsRecords(zone.id, "A");
+              const record = records.find((r) => r.name === project.domain);
+              if (record) {
+                await Cloudflare.deleteDnsRecord(zone.id, record.id);
+                logger.info(`Deleted DNS: ${project.domain}`, "servers");
+              }
+            }
+          } catch {
+            // Ignore DNS errors
+          }
+        }
+      }
+
+      // 3. Delete all projects on this server
+      setDeleteProgress("Deleting projects...");
+      for (const project of projects) {
+        DB.deleteProject(project.id);
+        logger.info(`Deleted project: ${project.name}`, "servers");
+      }
+
+      // 4. Delete droplet from DO
+      if (deleteOptions.deleteDroplet && selectedServer.public_ip) {
+        setDeleteProgress("Deleting droplet from Digital Ocean...");
+        try {
+          const droplets = await DO.listDroplets();
+          const droplet = droplets.find((d) => DO.getPublicIP(d) === selectedServer.public_ip);
+          if (droplet) {
+            await DO.deleteDroplet(droplet.id);
+            logger.info(`Deleted droplet: ${droplet.name}`, "servers");
+          }
+        } catch (err) {
+          logger.error(`Failed to delete droplet: ${err}`, "servers");
+        }
+      }
+
+      // 5. Delete server from local DB
+      setDeleteProgress("Removing server from database...");
+      deleteServer(selectedServer.id);
+      logger.success(`Deleted server: ${serverName}`, "servers");
+
+      setMode("list");
+      setSelectedIndex(Math.max(0, selectedIndex - 1));
+      setDeleteProgress("");
+      setDeleteOptions({ deleteDroplet: false, deleteDns: true, deleteGithubKey: true });
+      setDeleteSelectedOption(0);
+    } catch (err) {
+      logger.error(`Delete failed: ${err}`, "servers");
+      setDeleteProgress(`Error: ${err}`);
+    }
+  };
 
   const listItems: ListItem[] = servers.map((s) => ({
     id: s.id,
@@ -438,9 +671,32 @@ export default function Servers({ focused }: ServersProps) {
     );
   }
 
+  // Setup - GitHub connect in progress
+  if (mode === "setup-github-connect") {
+    return (
+      <Box flexDirection="column" padding={1}>
+        <Text bold color={colors.primary}>
+          Connecting to GitHub
+        </Text>
+        <Box marginY={1}>
+          {githubKeyAction.startsWith("Error") ? (
+            <Text color={colors.error}>{githubKeyAction}</Text>
+          ) : githubKeyAction === "Connected to GitHub!" ? (
+            <Text color={colors.success}>{githubKeyAction}</Text>
+          ) : (
+            <Spinner label={githubKeyAction} />
+          )}
+        </Box>
+        <Text color={colors.muted}>Press Esc to go back</Text>
+      </Box>
+    );
+  }
+
   // Setup - Done
   if (mode === "setup-done") {
     const result = setupState.result;
+    const showGitHubOption = result?.success && setupState.serverType !== "gateway";
+
     return (
       <Box flexDirection="column" padding={1}>
         <Text bold color={result?.success ? colors.success : colors.error}>
@@ -479,6 +735,13 @@ export default function Servers({ focused }: ServersProps) {
             <Text color={colors.error}>{result?.error || "Unknown error"}</Text>
           )}
         </Box>
+        {showGitHubOption && (
+          <Box marginY={1}>
+            <Text color={colors.muted}>
+              Press [G] to connect this server to GitHub (generate SSH key)
+            </Text>
+          </Box>
+        )}
         <Text color={colors.muted}>Press Esc to go back</Text>
       </Box>
     );
@@ -877,21 +1140,165 @@ export default function Servers({ focused }: ServersProps) {
     );
   }
 
-  if (mode === "delete" && selectedServer) {
+  // GitHub key management screen
+  if ((mode === "github-key" || mode === "github-key-action") && selectedServer) {
+    const keyTitle = `ruilify-${selectedServer.name}`;
+
     return (
-      <Modal
-        title="Delete Server"
-        message={`Are you sure you want to delete "${selectedServer.name}"?`}
-        type="confirm"
-        onConfirm={() => {
-          logger.info(`Deleting server: ${selectedServer.name}`, "servers");
-          deleteServer(selectedServer.id);
-          logger.success(`Deleted server: ${selectedServer.name}`, "servers");
-          setMode("list");
-          setSelectedIndex(Math.max(0, selectedIndex - 1));
-        }}
-        onCancel={() => setMode("list")}
-      />
+      <Box flexDirection="column" padding={1}>
+        <Text bold color={colors.primary}>
+          GitHub SSH Key - {selectedServer.name}
+        </Text>
+
+        <Box marginY={1} flexDirection="column">
+          <Text>
+            <Text color={colors.muted}>Key Title: </Text>
+            {keyTitle}
+          </Text>
+          <Text>
+            <Text color={colors.muted}>Status: </Text>
+            {githubConnected === null ? (
+              <Text color={colors.muted}>Checking...</Text>
+            ) : githubConnected ? (
+              <Text color={colors.success}>● Connected</Text>
+            ) : (
+              <Text color={colors.warning}>○ Not connected</Text>
+            )}
+          </Text>
+        </Box>
+
+        {githubKeyAction && (
+          <Box marginY={1}>
+            {mode === "github-key-action" ? (
+              <Spinner label={githubKeyAction} />
+            ) : (
+              <Text color={githubKeyAction.startsWith("Error") ? colors.error : colors.success}>
+                {githubKeyAction}
+              </Text>
+            )}
+          </Box>
+        )}
+
+        <Box marginY={1} flexDirection="column">
+          <Text color={colors.muted}>
+            {githubConnected
+              ? "Server can clone private repos from GitHub via SSH."
+              : "Connect to generate SSH key and register it on GitHub."}
+          </Text>
+        </Box>
+
+        <Box borderStyle="single" borderColor={colors.muted} paddingX={1}>
+          <Text color={colors.muted}>
+            {githubConnected ? (
+              "[T] Test [C] Regenerate [D] Delete [Esc] Back"
+            ) : (
+              "[C] Connect to GitHub [Esc] Back"
+            )}
+          </Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  // Delete server - running
+  if (mode === "delete-running" && selectedServer) {
+    return (
+      <Box flexDirection="column" padding={1}>
+        <Text bold color={colors.primary}>
+          Deleting {selectedServer.name}...
+        </Text>
+        <Box marginY={1}>
+          <Spinner label={deleteProgress || "Processing..."} />
+        </Box>
+      </Box>
+    );
+  }
+
+  // Delete server - options
+  if (mode === "delete" && selectedServer) {
+    const hasPublicIp = !!selectedServer.public_ip;
+    const projectsWithDomain = DB.listProjects().filter(
+      (p) => p.target_server === selectedServer.id && p.domain
+    );
+
+    // Build options list
+    const optionsList: Array<{ key: keyof typeof deleteOptions; label: string; description: string }> = [];
+
+    if (hasPublicIp) {
+      optionsList.push({
+        key: "deleteDroplet",
+        label: "Delete droplet from Digital Ocean",
+        description: `IP: ${selectedServer.public_ip}`,
+      });
+    }
+
+    optionsList.push({
+      key: "deleteDns",
+      label: "Delete DNS records from Cloudflare",
+      description: projectsWithDomain.length > 0
+        ? `${projectsWithDomain.length} domain(s): ${projectsWithDomain.map((p) => p.domain).join(", ")}`
+        : "No domains configured",
+    });
+
+    optionsList.push({
+      key: "deleteGithubKey",
+      label: "Delete GitHub SSH key",
+      description: `ruilify-${selectedServer.name}`,
+    });
+
+    return (
+      <Box flexDirection="column" padding={1}>
+        <Text bold color={colors.error}>
+          Delete Server: {selectedServer.name}
+        </Text>
+
+        <Box marginY={1} flexDirection="column">
+          <Text color={colors.muted}>Select what to delete (Space to toggle):</Text>
+          <Text />
+          {optionsList.map((opt, i) => (
+            <Box key={opt.key} flexDirection="column">
+              <Text>
+                <Text color={deleteSelectedOption === i ? colors.primary : colors.text}>
+                  {deleteSelectedOption === i ? "▸ " : "  "}
+                </Text>
+                <Text color={deleteOptions[opt.key] ? colors.success : colors.muted}>
+                  [{deleteOptions[opt.key] ? "x" : " "}]
+                </Text>
+                <Text> {opt.label}</Text>
+              </Text>
+              <Text color={colors.muted}>      {opt.description}</Text>
+            </Box>
+          ))}
+        </Box>
+
+        {/* Show projects that will be deleted */}
+        {DB.listProjects().filter((p) => p.target_server === selectedServer.id).length > 0 && (
+          <Box marginY={1} flexDirection="column">
+            <Text color={colors.warning}>
+              Projects that will be deleted:
+            </Text>
+            {DB.listProjects()
+              .filter((p) => p.target_server === selectedServer.id)
+              .map((p) => (
+                <Text key={p.id} color={colors.muted}>
+                  {"  "}- {p.name} {p.domain ? `(${p.domain})` : ""}
+                </Text>
+              ))}
+          </Box>
+        )}
+
+        <Box marginY={1}>
+          <Text color={colors.warning}>
+            This will permanently remove the server and all its projects.
+          </Text>
+        </Box>
+
+        <Box borderStyle="single" borderColor={colors.muted} paddingX={1}>
+          <Text color={colors.muted}>
+            [Space] Toggle  [Enter] Delete  [Esc] Cancel
+          </Text>
+        </Box>
+      </Box>
     );
   }
 
@@ -1194,6 +1601,20 @@ export default function Servers({ focused }: ServersProps) {
                 <Text color={colors.muted}>Caddy not installed</Text>
               </Text>
             ) : null}
+            {/* GitHub status for worker/build servers */}
+            {selectedServer.role !== "gateway" && (
+              <Text>
+                <Text color={githubConnected ? colors.success : colors.warning}>
+                  {githubConnected ? "● " : "○ "}
+                </Text>
+                <Text color={colors.muted}>GitHub </Text>
+                {githubConnected === null
+                  ? "checking..."
+                  : githubConnected
+                    ? "connected"
+                    : "not connected"}
+              </Text>
+            )}
 
             <Text />
             <Text bold color={colors.text}>
@@ -1245,7 +1666,7 @@ export default function Servers({ focused }: ServersProps) {
         {/* Actions */}
         <Box borderStyle="single" borderColor={colors.muted} paddingX={1}>
           <Text color={colors.muted}>
-            [r] Refresh [u] Check updates [U] Apply updates [Esc] Back
+            [r] Refresh [u] Check updates [U] Apply updates{selectedServer.role !== "gateway" ? " [G] GitHub" : ""} [Esc] Back
           </Text>
         </Box>
       </Box>

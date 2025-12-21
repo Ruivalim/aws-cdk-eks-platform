@@ -28,7 +28,7 @@ function getToken(): string {
 }
 
 /**
- * Make authenticated GitHub API request
+ * Make authenticated GitHub API GET request
  */
 async function githubFetch<T>(endpoint: string): Promise<T> {
 	const token = getToken();
@@ -46,6 +46,50 @@ async function githubFetch<T>(endpoint: string): Promise<T> {
 	}
 
 	return response.json() as Promise<T>;
+}
+
+/**
+ * Make authenticated GitHub API POST request
+ */
+async function githubPost<T>(endpoint: string, body: object): Promise<T> {
+	const token = getToken();
+	const response = await fetch(`${GITHUB_API_URL}${endpoint}`, {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${token}`,
+			Accept: 'application/vnd.github+json',
+			'X-GitHub-Api-Version': '2022-11-28',
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify(body),
+	});
+
+	if (!response.ok) {
+		const error = await response.text();
+		throw new Error(`GitHub API error: ${response.status} - ${error}`);
+	}
+
+	return response.json() as Promise<T>;
+}
+
+/**
+ * Make authenticated GitHub API DELETE request
+ */
+async function githubDelete(endpoint: string): Promise<void> {
+	const token = getToken();
+	const response = await fetch(`${GITHUB_API_URL}${endpoint}`, {
+		method: 'DELETE',
+		headers: {
+			Authorization: `Bearer ${token}`,
+			Accept: 'application/vnd.github+json',
+			'X-GitHub-Api-Version': '2022-11-28',
+		},
+	});
+
+	if (!response.ok) {
+		const error = await response.text();
+		throw new Error(`GitHub API error: ${response.status} - ${error}`);
+	}
 }
 
 // ============ Repository Types ============
@@ -204,7 +248,45 @@ export async function getRemoteUrl(host: string, repoDir: string): Promise<strin
 	return result.exitCode === 0 ? result.stdout.trim() : null;
 }
 
-// ============ SSH Key Management ============
+// ============ GitHub SSH Keys API ============
+
+export interface GitHubSSHKey {
+	id: number;
+	key: string;
+	title: string;
+	created_at: string;
+}
+
+/**
+ * List SSH keys on the GitHub account
+ */
+export async function listGitHubSSHKeys(): Promise<GitHubSSHKey[]> {
+	return githubFetch<GitHubSSHKey[]>('/user/keys');
+}
+
+/**
+ * Add an SSH key to the GitHub account
+ */
+export async function addGitHubSSHKey(title: string, publicKey: string): Promise<GitHubSSHKey> {
+	return githubPost<GitHubSSHKey>('/user/keys', { title, key: publicKey });
+}
+
+/**
+ * Delete an SSH key from the GitHub account
+ */
+export async function deleteGitHubSSHKey(keyId: number): Promise<void> {
+	await githubDelete(`/user/keys/${keyId}`);
+}
+
+/**
+ * Find a GitHub SSH key by title
+ */
+export async function findGitHubSSHKeyByTitle(title: string): Promise<GitHubSSHKey | null> {
+	const keys = await listGitHubSSHKeys();
+	return keys.find((k) => k.title === title) || null;
+}
+
+// ============ Server SSH Key Management ============
 
 /**
  * Generate an SSH key pair on a server for GitHub access
@@ -329,4 +411,87 @@ export async function cleanupBuilds(host: string, keepLast: number = 5): Promise
 			await ssh(host, `rm -rf /opt/builds/${dir}`);
 		}
 	}
+}
+
+// ============ Connect Server to GitHub ============
+
+export interface ConnectServerResult {
+	success: boolean;
+	message: string;
+	publicKey?: string;
+	keyId?: number;
+}
+
+/**
+ * Full flow to connect a server to GitHub:
+ * 1. Generate SSH key on server
+ * 2. Remove old key from GitHub if exists
+ * 3. Add new key to GitHub
+ * 4. Test connection
+ */
+export async function connectServerToGitHub(
+	host: string,
+	serverName: string
+): Promise<ConnectServerResult> {
+	const keyTitle = `ruilify-${serverName}`;
+
+	// 1. Generate SSH key on server
+	let publicKey: string;
+	try {
+		const keyResult = await generateDeployKey(host, 'github_deploy');
+		publicKey = keyResult.publicKey;
+	} catch (error) {
+		return {
+			success: false,
+			message: `Failed to generate SSH key: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+
+	// 2. Check if key already exists on GitHub (by title) and remove it
+	try {
+		const existingKey = await findGitHubSSHKeyByTitle(keyTitle);
+		if (existingKey) {
+			await deleteGitHubSSHKey(existingKey.id);
+		}
+	} catch (error) {
+		// Ignore errors when checking/deleting old key
+	}
+
+	// 3. Add the new key to GitHub
+	let keyId: number;
+	try {
+		const newKey = await addGitHubSSHKey(keyTitle, publicKey);
+		keyId = newKey.id;
+	} catch (error) {
+		return {
+			success: false,
+			message: `Failed to add SSH key to GitHub: ${error instanceof Error ? error.message : String(error)}`,
+			publicKey,
+		};
+	}
+
+	// 4. Test the connection
+	const connected = await testGitHubConnection(host);
+	if (!connected) {
+		return {
+			success: false,
+			message: 'SSH key added but connection test failed. May need to wait a moment.',
+			publicKey,
+			keyId,
+		};
+	}
+
+	return {
+		success: true,
+		message: `Server ${serverName} connected to GitHub successfully!`,
+		publicKey,
+		keyId,
+	};
+}
+
+/**
+ * Check if a server is connected to GitHub
+ */
+export async function isServerConnectedToGitHub(host: string): Promise<boolean> {
+	return testGitHubConnection(host);
 }
