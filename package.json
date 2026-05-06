@@ -1,0 +1,46 @@
+{
+  "name": "aws-cdk-eks-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Production-shaped EKS platform on AWS: network, cluster, node capacity and add-ons, defined with AWS CDK in TypeScript",
+  "bin": {
+    "aws-cdk-eks-platform": "bin/app.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "cdk": "cdk",
+    "synth": "cdk synth",
+    "diff": "cdk diff",
+    "deploy": "cdk deploy --all",
+    "destroy": "cdk destroy --all",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "fmt": "prettier --write .",
+    "fmt:check": "prettier --check .",
+    "check": "npm run fmt:check && npm run lint && npm run build && npm test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.10.2",
+    "aws-cdk": "^2.173.0",
+    "esbuild": "^0.24.2",
+    "eslint": "^9.17.0",
+    "globals": "^15.14.0",
+    "jest": "^29.7.0",
+    "prettier": "^3.4.2",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "typescript": "~5.7.2",
+    "typescript-eslint": "^8.18.1"
+  },
+  "dependencies": {
+    "@aws-cdk/lambda-layer-kubectl-v33": "^2.2.2",
+    "aws-cdk-lib": "^2.173.0",
+    "constructs": "^10.4.2",
+    "source-map-support": "^0.5.21"
+  }
+}
